@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Button, Input, Typography, useDesignSystemTheme } from '@databricks/design-system';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useNavigate } from '../common/utils/RoutingUtils';
@@ -8,6 +8,32 @@ import { getAjaxUrl } from '../common/utils/FetchUtils';
 import { MlflowLogo } from '../common/components/MlflowLogo';
 import { setActiveTeam } from './team-context';
 import ExperimentTrackingRoutes from '../experiment-tracking/routes';
+
+// ── SSO provider icons (simple text badges — no external icon deps) ──────────
+const SSO_PROVIDER_COLORS: Record<string, string> = {
+  github: '#24292f',
+  google: '#4285F4',
+  globus: '#00A0D6',
+  oidc: '#5A5A5A',
+};
+
+interface SSOProvider {
+  id: string;
+  name: string;
+  type: string;
+  icon: string;
+}
+
+const useSSOProviders = (): SSOProvider[] => {
+  const [providers, setProviders] = useState<SSOProvider[]>([]);
+  useEffect(() => {
+    fetch('/sso/providers', { credentials: 'same-origin' })
+      .then((r) => r.ok ? r.json() : { providers: [] })
+      .then((d) => setProviders(d.providers ?? []))
+      .catch(() => {});
+  }, []);
+  return providers;
+};
 
 const LoginPage = () => {
   const { theme } = useDesignSystemTheme();
@@ -195,7 +221,63 @@ const LoginPage = () => {
         >
           <FormattedMessage defaultMessage="Sign in" description="Login page submit button" />
         </Button>
+
+        <SSOSection theme={theme} />
       </div>
+    </div>
+  );
+};
+
+/** SSO provider buttons — rendered below the basic-auth form when providers are configured. */
+const SSOSection = ({ theme }: { theme: ReturnType<typeof useDesignSystemTheme>['theme'] }) => {
+  const providers = useSSOProviders();
+  if (providers.length === 0) return null;
+
+  const handleSSO = (providerId: string) => {
+    window.location.href = `/sso/login?provider=${encodeURIComponent(providerId)}`;
+  };
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+      <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+        <div css={{ flex: 1, height: 1, backgroundColor: theme.colors.border }} />
+        <Typography.Text color="secondary" size="sm">
+          <FormattedMessage defaultMessage="or continue with" description="Divider between basic auth and SSO providers on login page" />
+        </Typography.Text>
+        <div css={{ flex: 1, height: 1, backgroundColor: theme.colors.border }} />
+      </div>
+      {providers.map((p) => (
+        <button
+          key={p.id}
+          type="button"
+          aria-label={`Sign in with ${p.name}`}
+          title={`Sign in with ${p.name}`}
+          onClick={() => handleSSO(p.id)}
+          css={{
+            width: '100%',
+            padding: `${theme.spacing.sm}px ${theme.spacing.md}px`,
+            borderRadius: theme.general.borderRadiusBase,
+            border: `1px solid ${theme.colors.border}`,
+            backgroundColor: SSO_PROVIDER_COLORS[p.type] ?? '#5A5A5A',
+            color: '#fff',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: theme.spacing.sm,
+            fontSize: theme.typography.fontSizeBase,
+            fontWeight: 600,
+            '&:hover': { opacity: 0.88 },
+            '&:active': { opacity: 0.75 },
+          }}
+        >
+          <FormattedMessage
+            defaultMessage="Sign in with {name}"
+            description="SSO provider login button label"
+            values={{ name: p.name }}
+          />
+        </button>
+      ))}
     </div>
   );
 };

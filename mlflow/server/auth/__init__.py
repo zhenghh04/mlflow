@@ -375,7 +375,8 @@ _sso_config = None
 def _get_sso_config():
     global _sso_config
     if _sso_config is None:
-        cfg_path = os.environ.get("MLFLOW_AUTH_CONFIG_PATH", "")
+        import os as _os
+        cfg_path = _os.environ.get("MLFLOW_AUTH_CONFIG_PATH", "")
         _sso_config = load_sso_config(cfg_path)
     return _sso_config
 
