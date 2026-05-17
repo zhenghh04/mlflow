@@ -95,11 +95,12 @@ class SSOProvider:
     userinfo_url: str
     redirect_uri: str
     group_team_map: dict = field(default_factory=dict)
-    # Optional allowlist — if non-empty only these emails may sign in.
+    # Optional email allowlist — explicit addresses permitted to sign in.
     allowed_emails: frozenset = field(default_factory=frozenset)
+    # Domain allowlist — any @domain address is permitted (open by domain).
+    # e.g. allowed_domains = americansciencecloud.org,alcf.anl.gov
+    allowed_domains: frozenset = field(default_factory=frozenset)
     # Identity map: raw_username → canonical_username.
-    # Merges multiple SSO identities into one MLflow account.
-    # e.g. identity_map = zhenghh=huihuo.zheng,zhenghh04=huihuo.zheng
     identity_map: dict = field(default_factory=dict)
 
 
@@ -153,6 +154,11 @@ def load_sso_config(config_path: str) -> SSOConfig:
             e.strip().lower() for e in raw_emails.split(",") if e.strip()
         )
 
+        raw_domains = cp.get(section, "allowed_domains", fallback="")
+        allowed_domains = frozenset(
+            d.strip().lower().lstrip("@") for d in raw_domains.split(",") if d.strip()
+        )
+
         # identity_map: "raw=canonical,raw2=canonical2" pairs
         raw_imap = cp.get(section, "identity_map", fallback="")
         identity_map: dict[str, str] = {}
@@ -179,6 +185,7 @@ def load_sso_config(config_path: str) -> SSOConfig:
             redirect_uri=f"{server_url}/sso/callback/{pid}",
             group_team_map=group_map,
             allowed_emails=allowed,
+            allowed_domains=allowed_domains,
             identity_map=identity_map,
         )
         _logger.debug("Loaded SSO provider %r (type=%s)", pid, ptype)
@@ -247,10 +254,13 @@ def extract_username(user_info: dict, provider: SSOProvider) -> str:
     claim = provider.username_claim
     email_from_info = str(user_info.get("email", "")).strip().lower()
 
-    # Allowlist check — runs before username derivation so blocked users see
-    # a clear error rather than a 500.
-    if provider.allowed_emails and email_from_info:
-        if email_from_info not in provider.allowed_emails:
+    # Allowlist check — email must match an explicit address OR an allowed domain.
+    # If both lists are empty the provider is open to any account.
+    if (provider.allowed_emails or provider.allowed_domains) and email_from_info:
+        email_domain = email_from_info.split("@", 1)[-1] if "@" in email_from_info else ""
+        in_email_list = email_from_info in provider.allowed_emails
+        in_domain_list = email_domain in provider.allowed_domains
+        if not (in_email_list or in_domain_list):
             raise ValueError(
                 f"The email {email_from_info!r} is not authorised to access this "
                 "MLflow instance. Contact your administrator to be added."
