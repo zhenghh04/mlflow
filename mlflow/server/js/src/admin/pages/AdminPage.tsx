@@ -1525,11 +1525,11 @@ const AdminPage = () => {
             <Tabs.Trigger value="users">
               <FormattedMessage defaultMessage="Users" description="Admin users tab" />
             </Tabs.Trigger>
-            <Tabs.Trigger value="projects">
-              <FormattedMessage defaultMessage="Projects" description="Admin projects tab" />
-            </Tabs.Trigger>
             <Tabs.Trigger value="teams">
               <FormattedMessage defaultMessage="Teams" description="Admin teams tab" />
+            </Tabs.Trigger>
+            <Tabs.Trigger value="projects">
+              <FormattedMessage defaultMessage="Projects" description="Admin projects tab" />
             </Tabs.Trigger>
             <Tabs.Trigger value="models">
               <FormattedMessage defaultMessage="Models" description="Admin models tab" />
@@ -1541,11 +1541,11 @@ const AdminPage = () => {
           <Tabs.Content value="users" css={{ paddingTop: theme.spacing.md }}>
             <UsersTab />
           </Tabs.Content>
-          <Tabs.Content value="projects" css={{ paddingTop: theme.spacing.md }}>
-            <ProjectsTab />
-          </Tabs.Content>
           <Tabs.Content value="teams" css={{ paddingTop: theme.spacing.md }}>
             <TeamsTab />
+          </Tabs.Content>
+          <Tabs.Content value="projects" css={{ paddingTop: theme.spacing.md }}>
+            <ProjectsTab />
           </Tabs.Content>
           <Tabs.Content value="models" css={{ paddingTop: theme.spacing.md }}>
             <ModelsTab />
