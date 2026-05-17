@@ -320,6 +320,18 @@ from mlflow.server.auth.routes import (
 )
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
 from mlflow.tenant_context import resolve_tenant_slug, reset_active_tenant_slug, set_active_tenant_slug
+from mlflow.server.auth.sso import (
+    SSO_STATE_COOKIE,
+    SSO_TOKEN_COOKIE,
+    build_authorization_url,
+    exchange_code_for_token,
+    extract_groups,
+    extract_username,
+    get_user_info,
+    issue_session_token,
+    load_sso_config,
+    verify_session_token,
+)
 from mlflow.server.fastapi_app import create_fastapi_app
 from mlflow.server.handlers import (
     _add_static_prefix,
@@ -356,6 +368,16 @@ _logger = logging.getLogger(__name__)
 
 auth_config = read_auth_config()
 store = SqlAlchemyStore()
+
+# SSO config — loaded lazily when routes are registered
+_sso_config = None
+
+def _get_sso_config():
+    global _sso_config
+    if _sso_config is None:
+        cfg_path = os.environ.get("MLFLOW_AUTH_CONFIG_PATH", "")
+        _sso_config = load_sso_config(cfg_path)
+    return _sso_config
 
 # Cache for resource_id -> workspace_name mapping. The relationship between a resource
 # (experiment, registered model) and its workspace is immutable.
@@ -451,10 +473,11 @@ _UNPROTECTED_PATH_PREFIXES = (
     "/favicon.ico",
     "/health",
     "/static-files",  # static asset prefix used in some deployments
+    "/sso/",          # SSO login/callback routes must be accessible without auth
 )
 # The root path serves index.html (just HTML, no secrets).
 # The React app detects 401 on API calls and redirects to /#/login.
-_UNPROTECTED_EXACT_PATHS = {"/", "/manifest.json", "/asset-manifest.json"}
+_UNPROTECTED_EXACT_PATHS = {"/", "/manifest.json", "/asset-manifest.json", "/sso/providers"}
 
 
 def is_unprotected_route(path: str) -> bool:
@@ -469,6 +492,23 @@ def is_unprotected_route(path: str) -> bool:
 
 
 def make_basic_auth_response() -> Response:
+    # For browser requests (Accept: text/html) redirect to the login page so the
+    # user sees the styled form instead of a native Basic Auth dialog or a 401.
+    # API clients (curl, Python SDK, etc.) still receive the standard 401.
+    accept = request.headers.get("Accept", "")
+    if "text/html" in accept and request.method == "GET":
+        base = _add_static_prefix("/")
+        redirect_html = (
+            "<!doctype html><html><head>"
+            f'<meta http-equiv="refresh" content="0; url={base}#/login">'
+            f'<script>window.location.replace("{base}#/login");</script>'
+            "</head><body>Redirecting to login…</body></html>"
+        )
+        res = make_response(redirect_html)
+        res.status_code = 302
+        res.headers["Location"] = f"{base}#/login"
+        res.headers["Content-Type"] = "text/html; charset=utf-8"
+        return res
     res = make_response(
         "You are not authenticated. Please see "
         "https://www.mlflow.org/docs/latest/auth/index.html#authenticating-to-mlflow "
@@ -2346,8 +2386,31 @@ def get_auth_func(authorization_function: str) -> Callable[[], Authorization | R
     return getattr(module, fn_name)
 
 
+def _authenticate_sso_token() -> Authorization | None:
+    """Check for an SSO JWT token in the request cookie.
+
+    Returns a synthetic Authorization object if valid, None otherwise.
+    """
+    token = request.cookies.get(SSO_TOKEN_COOKIE, "")
+    if not token:
+        return None
+    secret_key = app.secret_key or ""
+    username = verify_session_token(token, secret_key)
+    if not username:
+        return None
+    # Build a synthetic Authorization object so the rest of the middleware
+    # works without modification.
+    from werkzeug.datastructures import Authorization as WerkzeugAuth
+    return WerkzeugAuth("sso", {"username": username, "password": ""})
+
+
 def authenticate_request_basic_auth() -> Authorization | Response:
-    """Authenticate the request using basic auth."""
+    """Authenticate the request using SSO token or HTTP Basic Auth."""
+    # Check SSO token first (set by the OAuth2 callback)
+    sso_auth = _authenticate_sso_token()
+    if sso_auth is not None:
+        return sso_auth
+
     if request.authorization is None:
         return make_basic_auth_response()
 
@@ -2486,6 +2549,178 @@ def delete_can_manage_registered_model_permission(resp: Response):
     """
     name = request.get_json(force=True, silent=True)["name"]
     store.delete_grants_for_resource("registered_model", name, workspace_scoped=True)
+
+
+# ---- SSO (Single Sign-On) routes ----
+
+@app.route("/sso/providers", methods=["GET"])
+def sso_providers():
+    """Return configured SSO providers for the login page."""
+    sso = _get_sso_config()
+    if not sso.enabled:
+        return jsonify({"providers": []})
+    return jsonify({
+        "providers": [
+            {"id": pid, "name": p.name, "icon": p.icon, "type": p.provider_type}
+            for pid, p in sso.providers.items()
+            if p.client_id
+        ]
+    })
+
+
+@app.route("/sso/login", methods=["GET"])
+def sso_login():
+    """Start the OAuth2 flow — redirect user to the provider."""
+    sso = _get_sso_config()
+    if not sso.enabled:
+        return make_response("SSO is not enabled", 404)
+
+    provider_id = request.args.get("provider", "")
+    provider = sso.providers.get(provider_id)
+    if not provider or not provider.client_id:
+        return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
+
+    import secrets as _secrets
+    state = _secrets.token_urlsafe(32)
+    redirect_uri = f"{sso.server_url.rstrip('/')}/sso/callback/{provider_id}"
+
+    auth_url = build_authorization_url(provider, redirect_uri, state)
+
+    resp = make_response()
+    resp.status_code = 302
+    resp.headers["Location"] = auth_url
+    # Store state in a short-lived cookie for CSRF protection
+    resp.set_cookie(
+        SSO_STATE_COOKIE, state, max_age=600,
+        httponly=True, samesite="Lax",
+    )
+    return resp
+
+
+@app.route("/sso/callback/<provider_id>", methods=["GET"])
+def sso_callback(provider_id: str):
+    """Handle OAuth2 callback: exchange code, provision user, issue JWT."""
+    sso = _get_sso_config()
+    if not sso.enabled:
+        return make_response("SSO is not enabled", 404)
+
+    provider = sso.providers.get(provider_id)
+    if not provider or not provider.client_id:
+        return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
+
+    # CSRF check
+    received_state = request.args.get("state", "")
+    stored_state = request.cookies.get(SSO_STATE_COOKIE, "")
+    if not received_state or received_state != stored_state:
+        return make_response("SSO state mismatch — possible CSRF attack", 400)
+
+    # Exchange code
+    code = request.args.get("code", "")
+    if not code:
+        error = request.args.get("error", "unknown")
+        return make_response(f"SSO provider returned error: {error}", 400)
+
+    redirect_uri = f"{sso.server_url.rstrip('/')}/sso/callback/{provider_id}"
+    try:
+        token_response = exchange_code_for_token(provider, code, redirect_uri)
+        user_info = get_user_info(provider, token_response)
+    except Exception as exc:
+        _logger.error("SSO token exchange failed for %s: %s", provider_id, exc)
+        return make_response(f"SSO authentication failed: {exc}", 502)
+
+    # Extract identity
+    try:
+        username = extract_username(user_info, provider)
+    except ValueError as exc:
+        return make_response(str(exc), 400)
+
+    display_name = user_info.get("name") or user_info.get("login") or username
+    email = user_info.get("email", "")
+    groups = extract_groups(user_info)
+
+    # Provision user if they don't exist yet
+    _sso_provision_user(username, display_name, email, provider, groups)
+
+    # Issue session JWT
+    secret_key = app.secret_key or ""
+    token = issue_session_token(username, secret_key)
+
+    # Redirect to the SPA root with the token stored in a cookie
+    frontend_url = "/"
+    resp = make_response()
+    resp.status_code = 302
+    resp.headers["Location"] = frontend_url
+    resp.set_cookie(SSO_TOKEN_COOKIE, token, max_age=86400, httponly=False, samesite="Lax")
+    # Clear state cookie
+    resp.set_cookie(SSO_STATE_COOKIE, "", max_age=0)
+    return resp
+
+
+def _sso_provision_user(
+    username: str,
+    display_name: str,
+    email: str,
+    provider,
+    groups: list[str],
+) -> None:
+    """Create user on first SSO login; ensure team memberships are current."""
+    from mlflow.tenant_context import DEFAULT_TENANT_SLUG, set_active_tenant_slug, reset_active_tenant_slug
+
+    # Check if user already exists
+    try:
+        user = store.get_user(username)
+        # Update profile info if it has changed
+        try:
+            store.update_profile(username, display_name=display_name, email=email)
+        except Exception:
+            pass
+    except Exception:
+        # New user — create with a random password (SSO users don't need one)
+        import secrets as _sec
+        random_pw = _sec.token_urlsafe(32) + "A1!"  # satisfies password policy
+        # Create in default tenant first (home tenant auto-created by create_user)
+        token = set_active_tenant_slug(DEFAULT_TENANT_SLUG)
+        try:
+            store.create_user(username, random_pw, is_admin=False, role="member")
+            store.update_profile(username, display_name=display_name, email=email)
+        except Exception as exc:
+            _logger.warning("SSO user provisioning failed for %s: %s", username, exc)
+        finally:
+            reset_active_tenant_slug(token)
+
+    # Auto-assign to teams based on group→team map
+    group_set = set(groups)
+    for group, team_slug in provider.group_team_map.items():
+        if group in group_set:
+            try:
+                token = set_active_tenant_slug(team_slug)
+                try:
+                    store.add_team_member(username=username, role=provider.default_role)
+                finally:
+                    reset_active_tenant_slug(token)
+            except Exception as exc:
+                _logger.warning("SSO group→team assignment failed (%s→%s): %s", group, team_slug, exc)
+
+    # Add to configured default team if set
+    if provider.default_team:
+        try:
+            token = set_active_tenant_slug(provider.default_team)
+            try:
+                store.add_team_member(username=username, role=provider.default_role)
+            finally:
+                reset_active_tenant_slug(token)
+        except Exception as exc:
+            _logger.warning("SSO default_team assignment failed: %s", exc)
+
+
+@app.route("/sso/logout", methods=["POST", "GET"])
+def sso_logout():
+    """Clear the SSO session token cookie and redirect to login."""
+    resp = make_response()
+    resp.status_code = 302
+    resp.headers["Location"] = "/#/login"
+    resp.set_cookie(SSO_TOKEN_COOKIE, "", max_age=0)
+    return resp
 
 
 # ---- Model visibility handler ----
