@@ -6,6 +6,8 @@ import {
   Empty,
   Input,
   Modal,
+  SimpleSelect,
+  SimpleSelectOption,
   Spinner,
   Table,
   TableCell,
@@ -36,6 +38,9 @@ import {
   useRolesQuery,
   useDeleteRole,
   useWithSettingsReturnTo,
+  useTeamMembersQuery,
+  useAddTeamMember,
+  useRemoveTeamMember,
 } from '../hooks';
 import { isWorkspaceAdminRole } from '../types';
 import { CreateUserModal } from '../components/CreateUserModal';
@@ -47,6 +52,134 @@ import {
   useCreateExperiment,
   useDeleteExperiment,
 } from '../hooks';
+
+const TEAM_ROLES = ['member', 'admin'] as const;
+
+/** Inline sub-section for managing active-team members. */
+const TeamMembersSection = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading } = useTeamMembersQuery();
+  const addMember = useAddTeamMember();
+  const removeMember = useRemoveTeamMember();
+
+  const [newUsername, setNewUsername] = useState('');
+  const [newRole, setNewRole] = useState<string>('member');
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const members = data?.members ?? [];
+
+  const handleAdd = async () => {
+    setAddError(null);
+    if (!newUsername.trim()) {
+      setAddError('Username is required');
+      return;
+    }
+    try {
+      await addMember.mutateAsync({ username: newUsername.trim(), role: newRole });
+      setNewUsername('');
+    } catch (e: unknown) {
+      setAddError(e instanceof Error ? e.message : 'Failed to add member');
+    }
+  };
+
+  const handleRemove = async (username: string) => {
+    try {
+      await removeMember.mutateAsync(username);
+    } catch {
+      // errors surface as query invalidation – user can retry
+    }
+  };
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+      <Typography.Title level={4}>
+        <FormattedMessage defaultMessage="Team Members" description="Team members section title in admin users tab" />
+      </Typography.Title>
+      {addError && (
+        <Alert
+          componentId="admin.team_members.add_error"
+          type="error"
+          message={addError}
+          closable
+          onClose={() => setAddError(null)}
+        />
+      )}
+      <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'flex-end' }}>
+        <Input
+          componentId="admin.team_members.username_input"
+          placeholder="Username"
+          value={newUsername}
+          onChange={(e) => setNewUsername(e.target.value)}
+          css={{ flex: 1 }}
+        />
+        <SimpleSelect
+          id="admin-team-members-role"
+          componentId="admin.team_members.role_select"
+          value={newRole}
+          onChange={({ target }) => setNewRole(target.value)}
+        >
+          {TEAM_ROLES.map((r) => (
+            <SimpleSelectOption key={r} value={r}>
+              {r}
+            </SimpleSelectOption>
+          ))}
+        </SimpleSelect>
+        <Button
+          componentId="admin.team_members.add_button"
+          type="primary"
+          loading={addMember.isLoading}
+          onClick={handleAdd}
+        >
+          <FormattedMessage defaultMessage="Add member" description="Button to add a team member" />
+        </Button>
+      </div>
+      {isLoading ? (
+        <Spinner size="small" />
+      ) : members.length === 0 ? (
+        <Typography.Text color="secondary">
+          <FormattedMessage defaultMessage="No members yet." description="Empty team members list" />
+        </Typography.Text>
+      ) : (
+        <Table scrollable noMinHeight css={{ border: `1px solid ${theme.colors.border}`, borderRadius: theme.general.borderRadiusBase, overflow: 'hidden' }}>
+          <TableRow isHeader>
+            <TableHeader componentId="admin.team_members.username_header" css={{ flex: 2 }}>
+              <FormattedMessage defaultMessage="Username" description="Team members table username header" />
+            </TableHeader>
+            <TableHeader componentId="admin.team_members.role_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Role" description="Team members table role header" />
+            </TableHeader>
+            <TableHeader componentId="admin.team_members.actions_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Actions" description="Team members table actions header" />
+            </TableHeader>
+          </TableRow>
+          {members.map((m) => (
+            <TableRow key={m.username}>
+              <TableCell css={{ flex: 2 }}>{m.username}</TableCell>
+              <TableCell css={{ flex: 1 }}>
+                {m.is_admin ? (
+                  <Tag componentId="admin.team_members.admin_tag" color="indigo">admin</Tag>
+                ) : (
+                  <Typography.Text>{m.role}</Typography.Text>
+                )}
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                <Button
+                  componentId="admin.team_members.remove_button"
+                  danger
+                  size="small"
+                  loading={removeMember.isLoading && removeMember.variables === m.username}
+                  onClick={() => handleRemove(m.username)}
+                >
+                  <FormattedMessage defaultMessage="Remove" description="Remove team member button" />
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </Table>
+      )}
+    </div>
+  );
+};
 
 const UsersTab = () => {
   const { theme } = useDesignSystemTheme();
@@ -147,6 +280,7 @@ const UsersTab = () => {
 
   return (
     <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      <TeamMembersSection />
       {error && (
         <Alert componentId="admin.users.error" type="error" message={error} closable onClose={() => setError(null)} />
       )}

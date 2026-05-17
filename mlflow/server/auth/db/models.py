@@ -15,6 +15,7 @@ from sqlalchemy.orm import declarative_base, relationship
 from mlflow.server.auth.entities import (
     Role,
     RolePermission,
+    TeamMembership,
     Tenant,
     User,
     UserRoleAssignment,
@@ -35,7 +36,7 @@ class SqlTenant(Base):
     max_users = Column(BigInteger(), nullable=True)
     created_at = Column(DateTime(), nullable=False, server_default=func.now())
 
-    users = relationship("SqlUser", backref="tenant", cascade="all, delete-orphan")
+    memberships = relationship("SqlTeamMembership", backref="tenant", cascade="all, delete-orphan")
     roles = relationship("SqlRole", backref="tenant", cascade="all, delete-orphan")
 
     def to_mlflow_entity(self):
@@ -50,28 +51,31 @@ class SqlTenant(Base):
 
 
 class SqlUser(Base):
+    """Global user account — not bound to any single tenant.
+
+    Team membership is expressed through ``SqlTeamMembership`` rows.
+    The ``is_admin`` flag is reserved for the system superuser account
+    (the ``admin`` user in the default tenant) and grants cross-tenant
+    access.  All other per-team admin status lives in
+    ``SqlTeamMembership.role``.
+    """
     __tablename__ = "users"
+
     id = Column(Integer(), primary_key=True)
-    username = Column(String(255))
+    username = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255))
     is_admin = Column(Boolean, default=False)
-    tenant_id = Column(Integer(), ForeignKey("tenants.id"), nullable=False)
-    # Cascade through user_role_assignments so ``session.delete(user)`` cleans
-    # up its assignments. Legacy permission tables (experiment_permissions,
-    # registered_model_permissions, ...) are retained on disk for rollback
-    # by the ``e5f6a7b8c9d0`` migration, but the auth server no longer reads
-    # or writes them post-migration; their FK constraints stay enforced at
-    # the schema level. delete_user() handles the legacy-row cleanup
-    # explicitly when needed.
+
+    memberships = relationship(
+        "SqlTeamMembership",
+        backref="user",
+        cascade="all, delete-orphan",
+    )
     user_role_assignments = relationship(
         "SqlUserRoleAssignment",
         backref="user",
         foreign_keys="SqlUserRoleAssignment.user_id",
         cascade="all, delete-orphan",
-    )
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "username", name="unique_tenant_username"),
-        Index("idx_users_tenant_id", "tenant_id"),
     )
 
     def to_mlflow_entity(self):
@@ -80,6 +84,34 @@ class SqlUser(Base):
             username=self.username,
             password_hash=self.password_hash,
             is_admin=self.is_admin,
+        )
+
+
+class SqlTeamMembership(Base):
+    """Maps a user to a tenant with a per-team role.
+
+    role: 'admin' — can manage users and permissions within this team
+          'member' — regular participant
+    """
+    __tablename__ = "team_memberships"
+
+    id = Column(Integer(), primary_key=True)
+    user_id = Column(Integer(), ForeignKey("users.id"), nullable=False)
+    tenant_id = Column(Integer(), ForeignKey("tenants.id"), nullable=False)
+    role = Column(String(32), nullable=False, default="member")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "tenant_id", name="uq_team_membership"),
+        Index("idx_team_memberships_user_id", "user_id"),
+        Index("idx_team_memberships_tenant_id", "tenant_id"),
+    )
+
+    def to_mlflow_entity(self):
+        return TeamMembership(
+            id_=self.id,
+            user_id=self.user_id,
+            tenant_id=self.tenant_id,
+            role=self.role,
         )
 
 

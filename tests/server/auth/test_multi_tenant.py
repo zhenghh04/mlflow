@@ -55,6 +55,7 @@ def test_set_tenant_slug_is_scoped(monkeypatch):
         ({"X-MLflow-Tenant": "acme"}, "acme"),
         ({"Host": "acme.mlflow.example.com"}, "acme"),
         ({"Host": "mlflow.example.com"}, DEFAULT_TENANT_SLUG),  # only 3 parts — not a tenant subdomain
+        ({"Host": "127.0.0.1:5005"}, DEFAULT_TENANT_SLUG),  # IPv4 — must not be treated as tenant
         ({}, DEFAULT_TENANT_SLUG),
         ({"X-MLflow-Tenant": "  "}, DEFAULT_TENANT_SLUG),
     ],

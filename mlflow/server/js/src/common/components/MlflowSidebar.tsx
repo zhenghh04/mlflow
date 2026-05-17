@@ -48,6 +48,7 @@ import { MlflowSidebarExperimentItems } from './MlflowSidebarExperimentItems';
 import { MlflowSidebarGatewayItems } from './MlflowSidebarGatewayItems';
 import { MlflowSidebarSettingsItems } from './MlflowSidebarSettingsItems';
 import { MlflowSidebarWorkflowSwitch } from './MlflowSidebarWorkflowSwitch';
+import { TeamSelector } from './TeamSelector';
 
 const isInsideExperiment = (location: Location) =>
   Boolean(matchPath('/experiments/:experimentId/*', location.pathname));
@@ -326,6 +327,7 @@ export function MlflowSidebar({
         />
       </div>
       {workspacesEnabled && showSidebar && <WorkspaceSelector />}
+      <TeamSelector collapsed={!showSidebar} />
       {workspacesEnabled && !showWorkspaceMenuItems && (
         <MlflowSidebarLink
           key="mlflow.sidebar.workspace_home_link"

@@ -374,6 +374,29 @@ export const AdminApi = {
     }) as Promise<{ experiments?: { experiment_id: string; name: string; lifecycle_stage: string; creation_time: number }[] }>;
   },
 
+  // Team membership (multi-tenant)
+  listTeamMembers: () =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/teams/members/list',
+      error: defaultErrorHandler,
+    }) as Promise<{ members?: { username: string; is_admin: boolean; role: string }[] }>,
+
+  addTeamMember: (username: string, role: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/teams/members/add',
+      method: 'POST',
+      body: JSON.stringify({ username, role }),
+      error: defaultErrorHandler,
+    }) as Promise<{ membership: { role: string } }>,
+
+  removeTeamMember: (username: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/teams/members/remove',
+      method: 'DELETE',
+      body: JSON.stringify({ username }),
+      error: defaultErrorHandler,
+    }),
+
   // Per-experiment permissions
   getExperimentPermission: (experimentId: string, username: string) => {
     const params = new URLSearchParams({ experiment_id: experimentId, username });
@@ -392,3 +415,10 @@ export const AdminApi = {
     });
   },
 };
+
+export const getUserTeams = () =>
+  fetchEndpoint({
+    relativeUrl: 'ajax-api/3.0/mlflow/users/teams',
+    error: async ({ reject, err }: { reject: (cause: any) => void; response: Response | undefined; err: Error }) =>
+      reject(err),
+  }) as Promise<{ teams?: { slug: string; name: string; role: string }[] }>;

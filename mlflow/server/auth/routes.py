@@ -112,6 +112,16 @@ AJAX_LIST_USER_ROLES = _get_ajax_path("/mlflow/users/roles/list", version=3)
 LIST_ROLE_USERS = _get_rest_path("/mlflow/roles/users/list", version=3)
 AJAX_LIST_ROLE_USERS = _get_ajax_path("/mlflow/roles/users/list", version=3)
 
+# Team membership routes
+ADD_TEAM_MEMBER = _get_rest_path("/mlflow/teams/members/add", version=3)
+AJAX_ADD_TEAM_MEMBER = _get_ajax_path("/mlflow/teams/members/add", version=3)
+REMOVE_TEAM_MEMBER = _get_rest_path("/mlflow/teams/members/remove", version=3)
+AJAX_REMOVE_TEAM_MEMBER = _get_ajax_path("/mlflow/teams/members/remove", version=3)
+LIST_TEAM_MEMBERS = _get_rest_path("/mlflow/teams/members/list", version=3)
+AJAX_LIST_TEAM_MEMBERS = _get_ajax_path("/mlflow/teams/members/list", version=3)
+GET_USER_TEAMS = _get_rest_path("/mlflow/users/teams", version=3)
+AJAX_GET_USER_TEAMS = _get_ajax_path("/mlflow/users/teams", version=3)
+
 # Tenant management routes (multi-tenancy)
 CREATE_TENANT = _get_rest_path("/mlflow/tenants/create", version=3)
 AJAX_CREATE_TENANT = _get_ajax_path("/mlflow/tenants/create", version=3)

@@ -3,6 +3,51 @@ from mlflow.server.auth.permissions import get_permission
 from mlflow.utils.workspace_utils import DEFAULT_WORKSPACE_NAME, resolve_entity_workspace_name
 
 
+class TeamMembership:
+    def __init__(self, id_, user_id, tenant_id, role):
+        self._id = id_
+        self._user_id = user_id
+        self._tenant_id = tenant_id
+        self._role = role
+
+    @property
+    def id(self):
+        return self._id
+
+    @property
+    def user_id(self):
+        return self._user_id
+
+    @property
+    def tenant_id(self):
+        return self._tenant_id
+
+    @property
+    def role(self):
+        return self._role
+
+    @role.setter
+    def role(self, role):
+        self._role = role
+
+    def to_json(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "tenant_id": self.tenant_id,
+            "role": self.role,
+        }
+
+    @classmethod
+    def from_json(cls, dictionary):
+        return cls(
+            id_=dictionary["id"],
+            user_id=dictionary["user_id"],
+            tenant_id=dictionary["tenant_id"],
+            role=dictionary["role"],
+        )
+
+
 class Tenant:
     def __init__(
         self,

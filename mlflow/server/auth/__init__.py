@@ -215,13 +215,21 @@ from mlflow.server.auth.permissions import (
 )
 from mlflow.server.auth.routes import (
     ADD_ROLE_PERMISSION,
+    ADD_TEAM_MEMBER,
     AJAX_ADD_ROLE_PERMISSION,
+    AJAX_ADD_TEAM_MEMBER,
     AJAX_ASSIGN_ROLE,
     AJAX_CREATE_ROLE,
     AJAX_CREATE_TENANT,
     AJAX_CREATE_USER,
     AJAX_DELETE_ROLE,
     AJAX_DELETE_TENANT,
+    AJAX_GET_USER_TEAMS,
+    AJAX_LIST_TEAM_MEMBERS,
+    AJAX_REMOVE_TEAM_MEMBER,
+    GET_USER_TEAMS,
+    LIST_TEAM_MEMBERS,
+    REMOVE_TEAM_MEMBER,
     AJAX_DELETE_USER,
     AJAX_GET_CURRENT_USER,
     AJAX_GET_ROLE,
@@ -1214,9 +1222,15 @@ def validate_can_manage_scorer_permission():
 
 
 def sender_is_admin():
-    """Validate if the sender is admin"""
-    username = authenticate_request().username
-    return store.get_user(username).is_admin
+    """True if the sender is the system admin OR is a team admin in the active team."""
+    try:
+        username = authenticate_request().username
+        user = store.get_user(username)
+        if user.is_admin:
+            return True
+        return store.is_team_admin(username)
+    except Exception:
+        return False
 
 
 def _is_workspace_admin(user_id: int, workspace: str) -> bool:
@@ -2410,7 +2424,14 @@ def _before_request():
             INTERNAL_ERROR,
         )
 
-    # admins don't need to be authorized
+    # Team membership check: the user must be a member of the requested team
+    # (system admins bypass this check via is_team_member returning True for is_admin).
+    username = authorization.username
+    from mlflow.tenant_context import DEFAULT_TENANT_SLUG as _DEFAULT_SLUG
+    if slug != _DEFAULT_SLUG and not store.is_team_member(username, slug):
+        return make_forbidden_response()
+
+    # admins (system or team) don't need further authorization
     if sender_is_admin():
         return
 
@@ -3234,13 +3255,17 @@ def create_user():
     if not request.is_json:
         return make_response("Invalid content type. Must be application/json", 400)
 
-    username = _get_request_param("username")
-    password = _get_request_param("password")
+    body = request.get_json(silent=True) or {}
+    username = body.get("username", "")
+    password = body.get("password", "")
+    role = body.get("role", "member")
 
     if not username or not password:
         return make_response("Username and password cannot be empty.", 400)
+    if role not in ("admin", "member"):
+        return make_response("role must be 'admin' or 'member'.", 400)
 
-    user = store.create_user(username, password)
+    user = store.create_user(username, password, role=role)
     return jsonify({"user": user.to_json()})
 
 
@@ -3462,7 +3487,13 @@ def update_user_password():
 def update_user_admin():
     username = _get_request_param("username")
     is_admin = _get_request_param("is_admin")
-    store.update_user(username, is_admin=is_admin)
+    # `role` param allows direct team-role update without touching the global flag
+    body = request.get_json(silent=True) or {}
+    role = body.get("role")
+    if role in ("admin", "member"):
+        store.add_team_member(username=username, role=role)
+    else:
+        store.update_user(username, is_admin=is_admin)
     _invalidate_user_auth_cache(username)
     return make_response({})
 
@@ -4217,6 +4248,62 @@ def _require_system_admin():
         return make_forbidden_response()
 
 
+# ---- Team membership handlers ----
+
+def add_team_member():
+    username = _get_request_param("username")
+    role = (request.get_json(silent=True) or {}).get("role", "member")
+    if role not in ("admin", "member"):
+        return jsonify({"error_code": "INVALID_PARAMETER_VALUE", "message": "role must be 'admin' or 'member'"}), 400
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    membership = store.add_team_member(username=username, role=role)
+    return jsonify({"membership": membership.to_json()})
+
+
+def remove_team_member():
+    username = _get_request_param("username")
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    store.remove_team_member(username=username)
+    return jsonify({})
+
+
+def list_team_members():
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    members = store.list_team_members()
+    return jsonify({
+        "members": [
+            {"username": u.username, "is_admin": u.is_admin, "role": role}
+            for u, role in members
+        ]
+    })
+
+
+def get_user_teams():
+    """Return all teams the current authenticated user belongs to."""
+    username = authenticate_request().username
+    teams = store.get_user_teams(username)
+    return jsonify({
+        "teams": [
+            {"slug": t.slug, "name": t.name, "role": role}
+            for t, role in teams
+        ]
+    })
+
+
+_TEAM_MEMBERSHIP_ROUTES: list[tuple[Callable[[], Any], str, str, str]] = [
+    (add_team_member, "POST", ADD_TEAM_MEMBER, AJAX_ADD_TEAM_MEMBER),
+    (remove_team_member, "DELETE", REMOVE_TEAM_MEMBER, AJAX_REMOVE_TEAM_MEMBER),
+    (list_team_members, "GET", LIST_TEAM_MEMBERS, AJAX_LIST_TEAM_MEMBERS),
+    (get_user_teams, "GET", GET_USER_TEAMS, AJAX_GET_USER_TEAMS),
+]
+
+
 # ---- Tenant management handlers ----
 
 def create_tenant():
@@ -4548,6 +4635,11 @@ def create_app(app: Flask = app):
 
     # Tenant management routes (multi-tenancy) — see _TENANT_ROUTES at module scope.
     for view_func, method, rest_path, ajax_path in _TENANT_ROUTES:
+        for path in (rest_path, ajax_path):
+            app.add_url_rule(rule=path, view_func=view_func, methods=[method])
+
+    # Team membership routes — see _TEAM_MEMBERSHIP_ROUTES at module scope.
+    for view_func, method, rest_path, ajax_path in _TEAM_MEMBERSHIP_ROUTES:
         for path in (rest_path, ajax_path):
             app.add_url_rule(rule=path, view_func=view_func, methods=[method])
 

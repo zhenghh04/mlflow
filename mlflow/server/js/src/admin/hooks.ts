@@ -54,6 +54,7 @@ export const AdminQueryKeys = {
   roleUsers: (roleId: number) => ['admin_role_users', roleId] as const,
   resourceOptions: (resourceType: string) => ['admin_resource_options', resourceType] as const,
   userPermissions: (username: string) => ['admin_user_permissions', username] as const,
+  teamMembers: ['admin_team_members'] as const,
 };
 
 /** Direct (non-role-derived) grants for an arbitrary user. Admin / self / WP-admin-of-target. */
@@ -74,6 +75,36 @@ export const useUsersQuery = () => {
     queryFn: AdminApi.listUsers,
     retry: false,
     refetchOnWindowFocus: false,
+  });
+};
+
+// Team membership queries and mutations (multi-tenant)
+export const useTeamMembersQuery = () => {
+  return useQuery({
+    queryKey: AdminQueryKeys.teamMembers,
+    queryFn: AdminApi.listTeamMembers,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useAddTeamMember = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ username, role }: { username: string; role: string }) => AdminApi.addTeamMember(username, role),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.teamMembers });
+    },
+  });
+};
+
+export const useRemoveTeamMember = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (username: string) => AdminApi.removeTeamMember(username),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.teamMembers });
+    },
   });
 };
 
