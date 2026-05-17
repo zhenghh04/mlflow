@@ -337,11 +337,18 @@ class SqlAlchemyStore:
             return [(u.to_mlflow_entity(), role) for u, role in rows]
 
     def get_user_teams(self, username: str) -> list[tuple[Tenant, str]]:
-        """Return (Tenant, role) pairs for every team username belongs to."""
+        """Return (Tenant, role) pairs for every team username belongs to.
+
+        Global admins (is_admin=True) can access all tenants, so we return
+        every tenant with role='admin' so the team switcher lists them all.
+        """
         with self.ManagedSessionMaker() as session:
             user = self._get_user_global(session, username)
             if user is None:
                 return []
+            if user.is_admin:
+                tenants = session.query(SqlTenant).all()
+                return [(t.to_mlflow_entity(), "admin") for t in tenants]
             rows = (
                 session.query(SqlTenant, SqlTeamMembership.role)
                 .join(SqlTeamMembership, SqlTenant.id == SqlTeamMembership.tenant_id)
