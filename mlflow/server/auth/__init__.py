@@ -3754,7 +3754,7 @@ def get_current_user():
     # that swap in a custom ``authorization_function``.
     username = authenticate_request().username
     user = store.get_user(username)
-    is_basic_auth = auth_config.authorization_function == DEFAULT_AUTHORIZATION_FUNCTION
+    is_basic_auth = True  # auth via oauth2-proxy
     team_role = store.get_team_role(username)
     return jsonify({
         "user": {
