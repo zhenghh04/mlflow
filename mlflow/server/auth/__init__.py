@@ -2849,15 +2849,14 @@ def list_global_admins():
     """
     if not sender_is_admin():
         return make_forbidden_response()
+    from mlflow.server.auth.db.models import SqlUser
     with store.ManagedSessionMaker() as session:
-        from mlflow.server.auth.db.models import SqlUser
-        admins = session.query(SqlUser).filter(SqlUser.is_admin.is_(True)).all()
-    return jsonify({
-        "users": [
+        # Extract data inside the session so ORM objects are not detached
+        rows = [
             {"id": u.id, "username": u.username, "is_admin": True}
-            for u in admins
+            for u in session.query(SqlUser).filter(SqlUser.is_admin.is_(True)).all()
         ]
-    })
+    return jsonify({"users": rows})
 
 
 @app.route("/ajax-api/2.0/mlflow/registered-models/list-admin", methods=["GET"])
