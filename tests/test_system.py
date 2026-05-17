@@ -206,7 +206,7 @@ if exp_id:
 
     code, data = req("GET",
         f"/api/2.0/mlflow/experiments/permissions/get"
-        f"?experiment_id={exp_id}&username=testuser_a",
+        f"?experiment_id={exp_id}&username=testuser_a_{TS}",
         tenant=f"test-alpha-{TS}")
     check("Get experiment permission", code, 200,
           data.get("experiment_permission", {}).get("permission", ""))
