@@ -3,6 +3,7 @@ import { SimpleSelect, SimpleSelectOption, Spinner, Typography, useDesignSystemT
 import { useQueryClient } from '@mlflow/mlflow/src/common/utils/reactQueryHooks';
 import { useNavigate } from '../utils/RoutingUtils';
 import ExperimentTrackingRoutes from '../../experiment-tracking/routes';
+import { getDefaultHeaders } from '../utils/FetchUtils';
 import { getActiveTeamSlug, setActiveTeam } from '../../account/team-context';
 
 interface TeamEntry {
@@ -12,14 +13,20 @@ interface TeamEntry {
 }
 
 /**
- * Fetches the user's team list directly via native fetch so it inherits the
- * browser's HTTP Basic Auth cache without going through the retry middleware
- * in fetchEndpoint (which can wait ~2 min before giving up on a 401).
+ * Fetches the user's team list.
+ *
+ * Uses native fetch (no retry middleware) but reads the
+ * ``mlflow-request-header-*`` cookies via ``getDefaultHeaders`` so the
+ * ``Authorization`` header is set correctly for cookie-based Basic Auth
+ * (the pattern used by our login form).
  */
 const fetchUserTeams = async (): Promise<TeamEntry[]> => {
   const res = await fetch('ajax-api/3.0/mlflow/users/teams', {
     credentials: 'same-origin',
-    headers: { Accept: 'application/json' },
+    headers: {
+      Accept: 'application/json',
+      ...getDefaultHeaders(document.cookie),
+    },
   });
   if (!res.ok) return [];
   const data = await res.json();

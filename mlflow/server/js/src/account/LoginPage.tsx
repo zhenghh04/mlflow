@@ -6,6 +6,7 @@ import { useQueryClient } from '../common/utils/reactQueryHooks';
 import { applyCredentials, btoaUtf8 } from './auth-utils';
 import { getAjaxUrl } from '../common/utils/FetchUtils';
 import { MlflowLogo } from '../common/components/MlflowLogo';
+import { setActiveTeam } from './team-context';
 import ExperimentTrackingRoutes from '../experiment-tracking/routes';
 
 const LoginPage = () => {
@@ -61,6 +62,30 @@ const LoginPage = () => {
       }
 
       applyCredentials(username, password);
+
+      // After setting auth credentials, fetch the user's teams and
+      // auto-activate the first non-default team so the team switcher
+      // and "Manage" link appear immediately after login.
+      try {
+        const teamsRes = await fetch(getAjaxUrl('ajax-api/3.0/mlflow/users/teams'), {
+          credentials: 'same-origin',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Basic ${btoaUtf8(`${username}:${password}`)}`,
+          },
+        });
+        if (teamsRes.ok) {
+          const teamsData = await teamsRes.json();
+          const teams: { slug: string; name: string; role: string }[] = teamsData?.teams ?? [];
+          const preferred = teams.find((t) => t.slug !== 'default') ?? teams[0];
+          if (preferred) {
+            setActiveTeam(preferred.slug);
+          }
+        }
+      } catch {
+        // non-critical: team context defaults to 'default'
+      }
+
       queryClient.clear();
       navigate(ExperimentTrackingRoutes.rootRoute);
     } catch {
