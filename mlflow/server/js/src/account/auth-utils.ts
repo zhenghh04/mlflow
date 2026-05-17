@@ -1,3 +1,5 @@
+import { btoaUtf8 as _btoaUtf8 } from '../common/utils/StringUtils';
+export { btoaUtf8 } from '../common/utils/StringUtils';
 export const AUTH_HEADER_COOKIE = 'mlflow-request-header-Authorization';
 export const MLFLOW_USER_COOKIE = 'mlflow_user';
 
@@ -35,6 +37,20 @@ export const clearAuthCookies = () => {
  * ``Authorization`` header is treated as a one-off override and leaves
  * the cache intact.
  */
+/**
+ * Write Basic Auth credentials into the cookies that FetchUtils reads on
+ * every request.  Use ``btoaUtf8`` (re-exported from auth-utils) so
+ * non-ASCII usernames/passwords encode correctly.
+ */
+export const applyCredentials = (username: string, password: string) => {
+  const encoded = _btoaUtf8(`${username}:${password}`);
+  const encodedUsername = encodeURIComponent(username);
+  for (const path of getAuthCookiePaths()) {
+    document.cookie = `${AUTH_HEADER_COOKIE}=${encodeURIComponent(`Basic ${encoded}`)}; path=${path}`;
+    document.cookie = `${MLFLOW_USER_COOKIE}=${encodedUsername}; path=${path}`;
+  }
+};
+
 export const performLogout = (queryClient?: { clear: () => void }) => {
   clearAuthCookies();
   queryClient?.clear();

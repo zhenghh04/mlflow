@@ -35,6 +35,32 @@ import { DEFAULT_WORKSPACE_NAME, isWorkspaceAdminRole } from './types';
 import type { Role } from './types';
 
 /**
+ * Reads the active tenant slug from the ``mlflow_tenant`` cookie set by
+ * the multi-tenant middleware, falling back to "default".
+ */
+const getActiveTenantSlug = (): string => {
+  const raw =
+    document.cookie
+      .split('; ')
+      .find((row) => row.startsWith('mlflow_tenant='))
+      ?.substring('mlflow_tenant='.length) ?? '';
+  try {
+    return decodeURIComponent(raw) || 'default';
+  } catch {
+    return raw || 'default';
+  }
+};
+
+const TenantBadge = () => {
+  const slug = getActiveTenantSlug();
+  return (
+    <Tag componentId="account.tenant_tag" color="default">
+      {slug}
+    </Tag>
+  );
+};
+
+/**
  * One row of the Roles tab on the Account page. Renders the role name,
  * its workspace (when ``workspacesEnabled``), and a "Manager" / "Admin"
  * tag for workspace-admin roles.
@@ -190,31 +216,45 @@ const AccountPage = () => {
     <ScrollablePageWrapper>
       <div css={{ padding: theme.spacing.md, display: 'flex', flexDirection: 'column', gap: theme.spacing.lg }}>
         <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-          <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
-            <Avatar
-              type="entity"
-              size="lg"
-              icon={<UserIcon />}
-              label={intl.formatMessage({
-                defaultMessage: 'Account',
-                description: 'Accessible label for the account-page icon avatar',
-              })}
-            />
-            <Typography.Title withoutMargins level={2}>
-              <FormattedMessage defaultMessage="Account" description="Account page title" />
-            </Typography.Title>
+          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
+              <Avatar
+                type="entity"
+                size="lg"
+                icon={<UserIcon />}
+                label={intl.formatMessage({
+                  defaultMessage: 'Profile',
+                  description: 'Accessible label for the profile-page icon avatar',
+                })}
+              />
+              <Typography.Title withoutMargins level={2}>
+                <FormattedMessage defaultMessage="Profile" description="Profile page title" />
+              </Typography.Title>
+            </div>
+            {isBasicAuth && username && (
+              <Button
+                componentId="account.logout_button"
+                type="tertiary"
+                onClick={() => performLogout(queryClient)}
+              >
+                <FormattedMessage defaultMessage="Log out" description="Log-out button on the profile page" />
+              </Button>
+            )}
           </div>
           {username && (
-            <Typography.Text color="secondary">
-              <FormattedMessage
-                defaultMessage="Logged in as <strong>{username}</strong>"
-                description="Subtitle showing the currently authenticated username"
-                values={{
-                  username,
-                  strong: (chunks) => <strong>{chunks}</strong>,
-                }}
-              />
-            </Typography.Text>
+            <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+              <Typography.Text color="secondary">
+                <FormattedMessage
+                  defaultMessage="Logged in as <strong>{username}</strong>"
+                  description="Subtitle showing the currently authenticated username"
+                  values={{
+                    username,
+                    strong: (chunks) => <strong>{chunks}</strong>,
+                  }}
+                />
+              </Typography.Text>
+              <TenantBadge />
+            </div>
           )}
         </div>
 
