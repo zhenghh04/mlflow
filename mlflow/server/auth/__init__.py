@@ -446,7 +446,15 @@ def _invalidate_user_auth_cache(username: str) -> None:
             _USER_AUTH_CACHE.pop(key, None)
 
 
-_UNPROTECTED_PATH_PREFIXES = ("/static", "/favicon.ico", "/health")
+_UNPROTECTED_PATH_PREFIXES = (
+    "/static",
+    "/favicon.ico",
+    "/health",
+    "/static-files",  # static asset prefix used in some deployments
+)
+# The root path serves index.html (just HTML, no secrets).
+# The React app detects 401 on API calls and redirects to /#/login.
+_UNPROTECTED_EXACT_PATHS = {"/", "/manifest.json", "/asset-manifest.json"}
 
 
 def is_unprotected_route(path: str) -> bool:
@@ -455,6 +463,8 @@ def is_unprotected_route(path: str) -> bool:
     # both the unprefixed and the prefixed forms so health checks don't end
     # up requiring auth on prefixed deployments.
     prefixed = tuple(_add_static_prefix(p) for p in _UNPROTECTED_PATH_PREFIXES)
+    if path in _UNPROTECTED_EXACT_PATHS:
+        return True
     return path.startswith(_UNPROTECTED_PATH_PREFIXES) or path.startswith(prefixed)
 
 
