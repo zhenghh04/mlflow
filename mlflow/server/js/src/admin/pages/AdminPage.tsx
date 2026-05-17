@@ -4,6 +4,8 @@ import {
   Button,
   Checkbox,
   Empty,
+  Input,
+  Modal,
   Spinner,
   Table,
   TableCell,
@@ -39,6 +41,12 @@ import { isWorkspaceAdminRole } from '../types';
 import { CreateUserModal } from '../components/CreateUserModal';
 import { CreateRoleModal } from '../components/CreateRoleModal';
 import { UserRolesCell } from '../components/UserRolesCell';
+import { ProjectPermissionsModal } from '../components/ProjectPermissionsModal';
+import {
+  useExperimentsQuery,
+  useCreateExperiment,
+  useDeleteExperiment,
+} from '../hooks';
 
 const UsersTab = () => {
   const { theme } = useDesignSystemTheme();
@@ -492,6 +500,217 @@ const RolesTab = () => {
   );
 };
 
+const ProjectsTab = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading, error } = useExperimentsQuery();
+  const createExperiment = useCreateExperiment();
+  const deleteExperiment = useDeleteExperiment();
+  const isAdmin = useCurrentUserIsAdmin();
+
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [permissionsTarget, setPermissionsTarget] = useState<{ id: string; name: string } | null>(null);
+
+  const experiments = useMemo(
+    () => (data?.experiments ?? []).filter((e) => e.lifecycle_stage === 'active'),
+    [data],
+  );
+
+  const handleCreate = async () => {
+    setCreateError(null);
+    if (!newName.trim()) {
+      setCreateError('Project name cannot be empty');
+      return;
+    }
+    try {
+      await createExperiment.mutateAsync(newName.trim());
+      setNewName('');
+      setShowCreate(false);
+    } catch (e: unknown) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create project');
+    }
+  };
+
+  const handleDelete = async (experimentId: string) => {
+    setDeleteError(null);
+    try {
+      await deleteExperiment.mutateAsync(experimentId);
+    } catch (e: unknown) {
+      setDeleteError(e instanceof Error ? e.message : 'Failed to delete project');
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div
+        css={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: theme.spacing.sm,
+          padding: theme.spacing.lg,
+          minHeight: 200,
+        }}
+      >
+        <Spinner size="small" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert
+        componentId="admin.projects.query_error"
+        type="error"
+        message="Failed to load projects"
+        description={(error as Error)?.message || 'An error occurred while fetching projects.'}
+      />
+    );
+  }
+
+  const emptyState =
+    experiments.length === 0 ? (
+      <Empty
+        title={<FormattedMessage defaultMessage="No projects" description="Empty state title for projects table" />}
+        description={
+          <FormattedMessage
+            defaultMessage="Create a project to get started."
+            description="Empty state description for projects table"
+          />
+        }
+      />
+    ) : null;
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      {deleteError && (
+        <Alert
+          componentId="admin.projects.delete_error"
+          type="error"
+          message={deleteError}
+          closable
+          onClose={() => setDeleteError(null)}
+        />
+      )}
+      <div css={{ display: 'flex', justifyContent: 'flex-end' }}>
+        {isAdmin && (
+          <Button
+            componentId="admin.projects.create_button"
+            type="primary"
+            onClick={() => setShowCreate(true)}
+          >
+            <FormattedMessage defaultMessage="Create Project" description="Button to create a new project" />
+          </Button>
+        )}
+      </div>
+      <Table
+        scrollable
+        noMinHeight
+        empty={emptyState}
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="admin.projects.name_header" css={{ flex: 3 }}>
+            <FormattedMessage defaultMessage="Project name" description="Projects table name header" />
+          </TableHeader>
+          <TableHeader componentId="admin.projects.id_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="ID" description="Projects table experiment ID header" />
+          </TableHeader>
+          <TableHeader componentId="admin.projects.actions_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Actions" description="Projects table actions header" />
+          </TableHeader>
+        </TableRow>
+        {experiments.map((exp) => (
+          <TableRow key={exp.experiment_id}>
+            <TableCell css={{ flex: 3 }}>
+              <Typography.Text>{exp.name}</Typography.Text>
+            </TableCell>
+            <TableCell css={{ flex: 1 }}>
+              <Typography.Text color="secondary">{exp.experiment_id}</Typography.Text>
+            </TableCell>
+            <TableCell css={{ flex: 2 }}>
+              <div css={{ display: 'flex', gap: theme.spacing.xs }}>
+                <Button
+                  componentId="admin.projects.permissions_button"
+                  type="tertiary"
+                  size="small"
+                  onClick={() => setPermissionsTarget({ id: exp.experiment_id, name: exp.name })}
+                >
+                  <FormattedMessage defaultMessage="Manage access" description="Button to open project permissions" />
+                </Button>
+                {isAdmin && (
+                  <Button
+                    componentId="admin.projects.delete_button"
+                    type="tertiary"
+                    danger
+                    size="small"
+                    loading={deleteExperiment.isLoading}
+                    onClick={() => handleDelete(exp.experiment_id)}
+                  >
+                    <FormattedMessage defaultMessage="Delete" description="Delete project button" />
+                  </Button>
+                )}
+              </div>
+            </TableCell>
+          </TableRow>
+        ))}
+      </Table>
+
+      {/* Create project modal */}
+      <Modal
+        componentId="admin.projects.create_modal"
+        title="Create project"
+        visible={showCreate}
+        onCancel={() => {
+          setShowCreate(false);
+          setNewName('');
+          setCreateError(null);
+        }}
+        onOk={handleCreate}
+        okText="Create"
+        confirmLoading={createExperiment.isLoading}
+      >
+        <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+          {createError && (
+            <Alert
+              componentId="admin.projects.create_error"
+              type="error"
+              message={createError}
+              closable
+              onClose={() => setCreateError(null)}
+            />
+          )}
+          <Typography.Text bold>Project name</Typography.Text>
+          <Input
+            componentId="admin.projects.name_input"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+            placeholder="e.g. my-experiment"
+            autoFocus
+          />
+        </div>
+      </Modal>
+
+      {/* Permissions modal */}
+      {permissionsTarget && (
+        <ProjectPermissionsModal
+          open
+          onClose={() => setPermissionsTarget(null)}
+          experimentId={permissionsTarget.id}
+          experimentName={permissionsTarget.name}
+        />
+      )}
+    </div>
+  );
+};
+
 const AdminPage = () => {
   const { theme } = useDesignSystemTheme();
   // Reflect the active tab in the URL (?tab=users|roles) so deep links — e.g.
@@ -499,7 +718,7 @@ const AdminPage = () => {
   // expected tab and a refresh preserves it.
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
-  const activeTab = tabFromUrl === 'roles' ? 'roles' : 'users';
+  const activeTab = tabFromUrl === 'roles' ? 'roles' : tabFromUrl === 'projects' ? 'projects' : 'users';
 
   const activeWorkspace = useActiveWorkspace();
   // Mode is path-driven, not role-driven: ``/admin`` is the cross-workspace
@@ -579,12 +798,18 @@ const AdminPage = () => {
             <Tabs.Trigger value="users">
               <FormattedMessage defaultMessage="Users" description="Admin users tab" />
             </Tabs.Trigger>
+            <Tabs.Trigger value="projects">
+              <FormattedMessage defaultMessage="Projects" description="Admin projects tab" />
+            </Tabs.Trigger>
             <Tabs.Trigger value="roles">
               <FormattedMessage defaultMessage="Roles" description="Admin roles tab" />
             </Tabs.Trigger>
           </Tabs.List>
           <Tabs.Content value="users" css={{ paddingTop: theme.spacing.md }}>
             <UsersTab />
+          </Tabs.Content>
+          <Tabs.Content value="projects" css={{ paddingTop: theme.spacing.md }}>
+            <ProjectsTab />
           </Tabs.Content>
           <Tabs.Content value="roles" css={{ paddingTop: theme.spacing.md }}>
             <RolesTab />

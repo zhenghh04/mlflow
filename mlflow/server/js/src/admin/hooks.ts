@@ -341,3 +341,106 @@ export const useResourceOptionsQuery = (resourceType: string) => {
   }
   return { options, isLoading, error };
 };
+
+
+// ---- Project (experiment) management ----
+
+export const AdminExperimentQueryKeys = {
+  experiments: ['admin_experiments'] as const,
+  experimentPermission: (experimentId: string, username: string) =>
+    ['admin_experiment_permission', experimentId, username] as const,
+};
+
+export const useExperimentsQuery = () => {
+  return useQuery({
+    queryKey: AdminExperimentQueryKeys.experiments,
+    queryFn: AdminApi.searchExperiments,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useCreateExperiment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => AdminApi.createExperiment(name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminExperimentQueryKeys.experiments });
+    },
+  });
+};
+
+export const useDeleteExperiment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (experimentId: string) => AdminApi.deleteExperiment(experimentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminExperimentQueryKeys.experiments });
+    },
+  });
+};
+
+export const useExperimentPermissionQuery = (experimentId: string, username: string) => {
+  return useQuery({
+    queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+    queryFn: () => AdminApi.getExperimentPermission(experimentId, username),
+    enabled: Boolean(experimentId) && Boolean(username),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useGrantExperimentPermission = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      experimentId,
+      username,
+      permission,
+    }: {
+      experimentId: string;
+      username: string;
+      permission: string;
+    }) => AdminApi.grantUserPermission('experiment', experimentId, username, permission),
+    onSuccess: (_data, { experimentId, username }) => {
+      queryClient.invalidateQueries({
+        queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+      });
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.userPermissions(username) });
+    },
+  });
+};
+
+export const useRevokeExperimentPermission = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ experimentId, username }: { experimentId: string; username: string }) =>
+      AdminApi.revokeUserPermission('experiment', experimentId, username),
+    onSuccess: (_data, { experimentId, username }) => {
+      queryClient.invalidateQueries({
+        queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+      });
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.userPermissions(username) });
+    },
+  });
+};
+
+export const useUpdateExperimentPermission = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      experimentId,
+      username,
+      permission,
+    }: {
+      experimentId: string;
+      username: string;
+      permission: string;
+    }) => AdminApi.updateExperimentPermission(experimentId, username, permission),
+    onSuccess: (_data, { experimentId, username }) => {
+      queryClient.invalidateQueries({
+        queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+      });
+    },
+  });
+};

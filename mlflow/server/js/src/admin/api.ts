@@ -345,4 +345,50 @@ export const AdminApi = {
       error: defaultErrorHandler,
     }) as Promise<{ model_definitions?: { model_definition_id: string; name: string }[] }>;
   },
+
+  // Project (experiment) management
+  createExperiment: (name: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/create',
+      method: 'POST',
+      body: JSON.stringify({ name }),
+      error: defaultErrorHandler,
+    }) as Promise<{ experiment_id: string }>;
+  },
+
+  deleteExperiment: (experimentId: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/delete',
+      method: 'DELETE',
+      body: JSON.stringify({ experiment_id: experimentId }),
+      error: defaultErrorHandler,
+    });
+  },
+
+  searchExperiments: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/search',
+      method: 'POST',
+      body: JSON.stringify({ max_results: 1000 }),
+      error: defaultErrorHandler,
+    }) as Promise<{ experiments?: { experiment_id: string; name: string; lifecycle_stage: string; creation_time: number }[] }>;
+  },
+
+  // Per-experiment permissions
+  getExperimentPermission: (experimentId: string, username: string) => {
+    const params = new URLSearchParams({ experiment_id: experimentId, username });
+    return fetchEndpoint({
+      relativeUrl: `ajax-api/2.0/mlflow/experiments/permissions/get?${params.toString()}`,
+      error: defaultErrorHandler,
+    }) as Promise<{ experiment_permission?: { permission: string } }>;
+  },
+
+  updateExperimentPermission: (experimentId: string, username: string, permission: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/permissions/update',
+      method: 'PATCH',
+      body: JSON.stringify({ experiment_id: experimentId, username, permission }),
+      error: defaultErrorHandler,
+    });
+  },
 };
