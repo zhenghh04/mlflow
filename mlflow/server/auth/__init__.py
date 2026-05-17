@@ -2534,12 +2534,22 @@ def _before_request():
     # the membership query.
     try:
         user = store.get_user(username)
-        is_global_admin = user.is_admin
-    except Exception:
+        is_global_admin = bool(user.is_admin)
+    except Exception as _exc:
+        _logger.warning("_before_request: get_user(%r) failed: %s", username, _exc)
         is_global_admin = False
+
+    _logger.debug(
+        "_before_request: method=%s path=%s user=%r slug=%r is_global_admin=%s",
+        request.method, request.path, username, slug, is_global_admin,
+    )
 
     if not is_global_admin:
         if slug != _DEFAULT_SLUG and not store.is_team_member(username, slug):
+            _logger.warning(
+                "_before_request: 403 team-membership check failed: user=%r slug=%r",
+                username, slug,
+            )
             return make_forbidden_response()
 
     # admins (system or team) don't need further authorization
