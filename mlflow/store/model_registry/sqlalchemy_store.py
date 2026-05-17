@@ -187,12 +187,14 @@ class SqlAlchemyStore(AbstractStore):
 
     def _get_query(self, session, model):
         """
-        Return a query for ``model``.
-        Always filter on workspace for relevant models, to benefit from DB index.
+        Return a query for ``model`` scoped to the active workspace and tenant.
         """
         query = session.query(model)
         if model in _WORKSPACE_MODELS:
             query = query.filter(model.workspace == self._get_active_workspace())
+        # Apply tenant filter for models that carry the tenant column.
+        if hasattr(model, "tenant"):
+            query = query.filter(model.tenant == get_active_tenant_slug())
         return query
 
     def _with_workspace_field(self, instance):
@@ -636,7 +638,10 @@ class SqlAlchemyStore(AbstractStore):
 
         attribute_filters.extend(self._get_workspace_clauses(SqlRegisteredModel))
 
-        rm_query = select(SqlRegisteredModel).filter(*attribute_filters)
+        rm_query = select(SqlRegisteredModel).filter(
+            *attribute_filters,
+            SqlRegisteredModel.tenant == get_active_tenant_slug(),
+        )
 
         if not self._is_querying_prompt(parsed_filters):
             rm_query = self._update_query_to_exclude_prompts(
