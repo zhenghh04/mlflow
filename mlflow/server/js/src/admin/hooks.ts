@@ -512,3 +512,50 @@ export const useSetModelVisibility = () => {
     },
   });
 };
+
+// ---- Team (tenant) management ----
+
+export const AdminTeamQueryKeys = {
+  teams: ['admin_teams'] as const,
+};
+
+export const useTeamsQuery = () => {
+  return useQuery({
+    queryKey: AdminTeamQueryKeys.teams,
+    queryFn: AdminApi.listTeams,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useCreateTeam = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, name, storage_root }: { slug: string; name: string; storage_root?: string }) =>
+      AdminApi.createTeam(slug, name, storage_root),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminTeamQueryKeys.teams });
+    },
+  });
+};
+
+export const useDeleteTeam = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (slug: string) => AdminApi.deleteTeam(slug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminTeamQueryKeys.teams });
+    },
+  });
+};
+
+export const useUpdateTeam = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, name, storage_root }: { slug: string; name: string; storage_root?: string }) =>
+      AdminApi.updateTeam(slug, name, storage_root),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminTeamQueryKeys.teams });
+    },
+  });
+};

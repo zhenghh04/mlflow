@@ -406,6 +406,37 @@ export const AdminApi = {
     }) as Promise<{ experiment_permission?: { permission: string } }>;
   },
 
+  // ---- Team (tenant) management ----
+  listTeams: () =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/list',
+      error: defaultErrorHandler,
+    }) as Promise<{ tenants?: { id: number; slug: string; name: string; storage_root?: string; max_experiments?: number; max_users?: number }[] }>,
+
+  createTeam: (slug: string, name: string, storage_root?: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/create',
+      method: 'POST',
+      body: JSON.stringify({ slug, name, storage_root }),
+      error: defaultErrorHandler,
+    }) as Promise<{ tenant: { id: number; slug: string; name: string } }>,
+
+  deleteTeam: (slug: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/delete',
+      method: 'DELETE',
+      body: JSON.stringify({ slug }),
+      error: defaultErrorHandler,
+    }),
+
+  updateTeam: (slug: string, name: string, storage_root?: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/update',
+      method: 'PATCH',
+      body: JSON.stringify({ slug, name, storage_root }),
+      error: defaultErrorHandler,
+    }) as Promise<{ tenant: { slug: string; name: string } }>,
+
   setModelVisibility: (name: string, visibility: 'team' | 'public') => {
     return fetchEndpoint({
       relativeUrl: 'ajax-api/2.0/mlflow/registered-models/set-visibility',

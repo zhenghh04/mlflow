@@ -55,6 +55,9 @@ import {
   useRenameExperiment,
   useRegisteredModelsQuery,
   useSetModelVisibility,
+  useTeamsQuery,
+  useCreateTeam,
+  useDeleteTeam,
 } from '../hooks';
 
 const TEAM_ROLES = ['member', 'admin'] as const;
@@ -1075,6 +1078,225 @@ const ProjectsTab = () => {
   );
 };
 
+const TeamsTab = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading, error } = useTeamsQuery();
+  const createTeam = useCreateTeam();
+  const deleteTeam = useDeleteTeam();
+
+  const [showCreate, setShowCreate] = useState(false);
+  const [newSlug, setNewSlug] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newStorageRoot, setNewStorageRoot] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const teams = useMemo(() => data?.tenants ?? [], [data]);
+
+  const handleCreate = async () => {
+    setCreateError(null);
+    if (!newSlug.trim() || !newName.trim()) {
+      setCreateError('Slug and name are required');
+      return;
+    }
+    if (!/^[a-z0-9-]+$/.test(newSlug.trim())) {
+      setCreateError('Slug must contain only lowercase letters, digits, and hyphens');
+      return;
+    }
+    try {
+      await createTeam.mutateAsync({
+        slug: newSlug.trim(),
+        name: newName.trim(),
+        storage_root: newStorageRoot.trim() || undefined,
+      });
+      setNewSlug(''); setNewName(''); setNewStorageRoot('');
+      setShowCreate(false);
+    } catch (e: unknown) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create team');
+    }
+  };
+
+  const handleDelete = async (slug: string) => {
+    setDeleteError(null);
+    try {
+      await deleteTeam.mutateAsync(slug);
+    } catch (e: unknown) {
+      setDeleteError(e instanceof Error ? e.message : `Failed to delete team '${slug}'`);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div css={{ display: 'flex', justifyContent: 'center', padding: theme.spacing.lg }}>
+        <Spinner size="small" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert
+        componentId="admin.teams.error"
+        type="error"
+        message="Failed to load teams"
+        description={(error as Error)?.message}
+      />
+    );
+  }
+
+  const emptyState =
+    teams.length === 0 ? (
+      <Empty
+        title={<FormattedMessage defaultMessage="No teams" description="Empty state for teams table" />}
+        description={
+          <FormattedMessage
+            defaultMessage="Create a team to get started."
+            description="Empty state description for teams table"
+          />
+        }
+      />
+    ) : null;
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      {deleteError && (
+        <Alert
+          componentId="admin.teams.delete_error"
+          type="error"
+          message={deleteError}
+          closable
+          onClose={() => setDeleteError(null)}
+        />
+      )}
+
+      <div css={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Button
+          componentId="admin.teams.create_button"
+          type="primary"
+          onClick={() => setShowCreate(true)}
+        >
+          <FormattedMessage defaultMessage="Create Team" description="Button to create a new team" />
+        </Button>
+      </div>
+
+      <Table
+        scrollable
+        noMinHeight
+        empty={emptyState}
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="admin.teams.name_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Name" description="Teams table name header" />
+          </TableHeader>
+          <TableHeader componentId="admin.teams.slug_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="Slug" description="Teams table slug header" />
+          </TableHeader>
+          <TableHeader componentId="admin.teams.storage_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Storage root" description="Teams table storage root header" />
+          </TableHeader>
+          <TableHeader componentId="admin.teams.actions_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="Actions" description="Teams table actions header" />
+          </TableHeader>
+        </TableRow>
+        {teams.map((team) => (
+          <TableRow key={team.slug}>
+            <TableCell css={{ flex: 2 }}>
+              <Typography.Text bold>{team.name}</Typography.Text>
+            </TableCell>
+            <TableCell css={{ flex: 1 }}>
+              <Tag componentId="admin.teams.slug_tag" color="default">
+                {team.slug}
+              </Tag>
+            </TableCell>
+            <TableCell css={{ flex: 2 }}>
+              <Typography.Text color="secondary">
+                {team.storage_root || '—'}
+              </Typography.Text>
+            </TableCell>
+            <TableCell css={{ flex: 1 }}>
+              {team.slug !== 'default' && (
+                <Button
+                  componentId="admin.teams.delete_button"
+                  type="tertiary"
+                  danger
+                  size="small"
+                  loading={deleteTeam.isLoading}
+                  onClick={() => handleDelete(team.slug)}
+                >
+                  <FormattedMessage defaultMessage="Delete" description="Delete team button" />
+                </Button>
+              )}
+              {team.slug === 'default' && (
+                <Typography.Text color="secondary">
+                  <FormattedMessage defaultMessage="System" description="System team label" />
+                </Typography.Text>
+              )}
+            </TableCell>
+          </TableRow>
+        ))}
+      </Table>
+
+      {/* Create team modal */}
+      <Modal
+        componentId="admin.teams.create_modal"
+        title="Create team"
+        visible={showCreate}
+        onCancel={() => { setShowCreate(false); setNewSlug(''); setNewName(''); setNewStorageRoot(''); setCreateError(null); }}
+        onOk={handleCreate}
+        okText="Create"
+        confirmLoading={createTeam.isLoading}
+      >
+        <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+          {createError && (
+            <Alert
+              componentId="admin.teams.create_error"
+              type="error"
+              message={createError}
+              closable
+              onClose={() => setCreateError(null)}
+            />
+          )}
+          <div>
+            <Typography.Text bold>Team name</Typography.Text>
+            <Input
+              componentId="admin.teams.name_input"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="e.g. Data Science"
+              autoFocus
+            />
+          </div>
+          <div>
+            <Typography.Text bold>Slug</Typography.Text>
+            <Typography.Hint>URL-safe identifier — lowercase, digits, hyphens only</Typography.Hint>
+            <Input
+              componentId="admin.teams.slug_input"
+              value={newSlug}
+              onChange={(e) => setNewSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
+              placeholder="e.g. data-science"
+            />
+          </div>
+          <div>
+            <Typography.Text bold>Artifact storage root <Typography.Text color="secondary">(optional)</Typography.Text></Typography.Text>
+            <Typography.Hint>Base path for experiment artifacts, e.g. /eagle/datascience/mlflow</Typography.Hint>
+            <Input
+              componentId="admin.teams.storage_input"
+              value={newStorageRoot}
+              onChange={(e) => setNewStorageRoot(e.target.value)}
+              placeholder="e.g. /eagle/datascience/mlflow"
+            />
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+};
+
 const ModelsTab = () => {
   const { theme } = useDesignSystemTheme();
   const { data, isLoading, error } = useRegisteredModelsQuery();
@@ -1222,6 +1444,7 @@ const AdminPage = () => {
     tabFromUrl === 'roles' ? 'roles'
     : tabFromUrl === 'projects' ? 'projects'
     : tabFromUrl === 'models' ? 'models'
+    : tabFromUrl === 'teams' ? 'teams'
     : 'users';
 
   const activeWorkspace = useActiveWorkspace();
@@ -1305,6 +1528,9 @@ const AdminPage = () => {
             <Tabs.Trigger value="projects">
               <FormattedMessage defaultMessage="Projects" description="Admin projects tab" />
             </Tabs.Trigger>
+            <Tabs.Trigger value="teams">
+              <FormattedMessage defaultMessage="Teams" description="Admin teams tab" />
+            </Tabs.Trigger>
             <Tabs.Trigger value="models">
               <FormattedMessage defaultMessage="Models" description="Admin models tab" />
             </Tabs.Trigger>
@@ -1317,6 +1543,9 @@ const AdminPage = () => {
           </Tabs.Content>
           <Tabs.Content value="projects" css={{ paddingTop: theme.spacing.md }}>
             <ProjectsTab />
+          </Tabs.Content>
+          <Tabs.Content value="teams" css={{ paddingTop: theme.spacing.md }}>
+            <TeamsTab />
           </Tabs.Content>
           <Tabs.Content value="models" css={{ paddingTop: theme.spacing.md }}>
             <ModelsTab />

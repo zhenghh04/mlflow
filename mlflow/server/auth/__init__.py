@@ -3627,14 +3627,20 @@ def update_user_password():
 @catch_mlflow_exception
 def update_user_admin():
     username = _get_request_param("username")
-    is_admin = _get_request_param("is_admin")
-    # `role` param allows direct team-role update without touching the global flag
     body = request.get_json(silent=True) or {}
     role = body.get("role")
+
     if role in ("admin", "member"):
+        # Team-role update — update membership in the active team
         store.add_team_member(username=username, role=role)
     else:
-        store.update_user(username, is_admin=is_admin)
+        # Global admin flag — directly set users.is_admin regardless of active tenant
+        is_admin = body.get("is_admin", _get_request_param("is_admin"))
+        with store.ManagedSessionMaker(read_only=False) as session:
+            user = store._get_user(session, username)
+            user.is_admin = bool(is_admin)
+            session.flush()
+
     _invalidate_user_auth_cache(username)
     return make_response({})
 
