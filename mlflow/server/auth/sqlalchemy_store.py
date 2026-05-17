@@ -369,6 +369,29 @@ class SqlAlchemyStore:
             except MlflowException:
                 return False
 
+    def _ensure_home_tenant(self, session, user: SqlUser) -> None:
+        """Create a private home tenant for ``user`` if it doesn't exist yet.
+
+        The home tenant slug equals the username.  The user is the sole admin
+        so they have full control; no one else has access by default.
+        Layout mirrors an HPC home directory — private by default, sharable
+        on request.
+        """
+        slug = user.username
+        existing = session.query(SqlTenant).filter(SqlTenant.slug == slug).first()
+        if existing is None:
+            home = SqlTenant(slug=slug, name=f"{user.username}'s workspace")
+            session.add(home)
+            session.flush()  # assign home.id
+            session.add(SqlTeamMembership(user_id=user.id, tenant_id=home.id, role="admin"))
+            session.flush()
+        else:
+            # Tenant exists — ensure membership
+            m = self._get_membership(session, user.id, existing.id)
+            if m is None:
+                session.add(SqlTeamMembership(user_id=user.id, tenant_id=existing.id, role="admin"))
+                session.flush()
+
     def create_user(
         self,
         username: str,
@@ -394,6 +417,9 @@ class SqlAlchemyStore:
                 if m is None:
                     session.add(SqlTeamMembership(user_id=existing.id, tenant_id=tenant_id, role=role))
                     session.flush()
+                # Ensure the user always has a home tenant
+                if not existing.is_admin:
+                    self._ensure_home_tenant(session, existing)
                 return existing.to_mlflow_entity()
             pwhash = generate_password_hash(password)
             try:
@@ -406,6 +432,9 @@ class SqlAlchemyStore:
                 if not (is_admin and get_active_tenant_slug() == _DS):
                     session.add(SqlTeamMembership(user_id=user.id, tenant_id=tenant_id, role=role))
                     session.flush()
+                # Every non-admin user gets a private home tenant named after them
+                if not is_admin:
+                    self._ensure_home_tenant(session, user)
                 return user.to_mlflow_entity()
             except IntegrityError as e:
                 raise MlflowException(
