@@ -372,10 +372,9 @@ store = SqlAlchemyStore()
 # SSO config — loaded lazily when routes are registered
 _sso_config = None
 
-# Server-side OAuth state store: {state_token: expiry_timestamp}
-# Avoids relying on SameSite cookies which are unreliable on localhost
-# when the OAuth redirect chain crosses domain boundaries.
-_sso_states: dict[str, float] = {}
+# ── Self-verifying OAuth2 CSRF state ────────────────────────────────────────
+# State format: base64url(timestamp:nonce).hmac_sha256[:16]
+# No server-side storage needed → works across all uvicorn workers.
 
 
 def _get_sso_config():
@@ -2597,18 +2596,20 @@ def sso_login():
     if not provider or not provider.client_id:
         return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
 
-    import secrets as _secrets
-    import time as _time
-    state = _secrets.token_urlsafe(32)
+    import secrets as _secrets, time as _time, hmac as _hmac, hashlib as _hl, base64 as _b64
+
+    # Build a self-verifying CSRF state token so no server-side storage is
+    # needed — works across all uvicorn workers.
+    nonce = _secrets.token_urlsafe(16)
+    ts = str(int(_time.time()))
+    payload = f"{ts}:{nonce}"
+    b64_payload = _b64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    sig = _hmac.new(
+        (app.secret_key or "").encode(), b64_payload.encode(), _hl.sha256
+    ).hexdigest()[:24]
+    state = f"{b64_payload}.{sig}"
+
     redirect_uri = f"{sso.server_url.rstrip('/')}/sso/callback/{provider_id}"
-
-    # Store state server-side (avoids SameSite cookie issues on localhost)
-    _sso_states[state] = _time.time() + 600  # 10-minute TTL
-    # Evict expired states while we're here
-    now = _time.time()
-    for s in [k for k, exp in _sso_states.items() if exp < now]:
-        _sso_states.pop(s, None)
-
     auth_url = build_authorization_url(provider, redirect_uri, state)
 
     resp = make_response()
@@ -2628,15 +2629,31 @@ def sso_callback(provider_id: str):
     if not provider or not provider.client_id:
         return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
 
-    # CSRF check — verify state against server-side store (no cookie needed)
-    import time as _time
+    # CSRF check — verify self-contained HMAC state (no server storage, works
+    # across all uvicorn workers).
+    import time as _time, hmac as _hmac, hashlib as _hl, base64 as _b64
+
     received_state = request.args.get("state", "")
-    if not received_state or received_state not in _sso_states:
-        return make_response("SSO state invalid or expired — please try logging in again", 400)
-    if _sso_states[received_state] < _time.time():
-        _sso_states.pop(received_state, None)
-        return make_response("SSO state expired — please try logging in again", 400)
-    _sso_states.pop(received_state, None)  # one-time use
+    _state_error = None
+    try:
+        b64_payload, sig = received_state.rsplit(".", 1)
+        expected_sig = _hmac.new(
+            (app.secret_key or "").encode(), b64_payload.encode(), _hl.sha256
+        ).hexdigest()[:24]
+        if not _hmac.compare_digest(sig, expected_sig):
+            _state_error = "invalid signature"
+        else:
+            payload = _b64.urlsafe_b64decode(b64_payload + "==").decode()
+            ts = int(payload.split(":")[0])
+            if _time.time() - ts > 600:
+                _state_error = "expired"
+    except Exception:
+        _state_error = "malformed"
+
+    if _state_error:
+        return make_response(
+            f"SSO login failed ({_state_error}) — please try again", 400
+        )
 
     # Exchange code
     code = request.args.get("code", "")
