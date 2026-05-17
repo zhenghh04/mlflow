@@ -218,22 +218,27 @@ from mlflow.server.auth.routes import (
     AJAX_ADD_ROLE_PERMISSION,
     AJAX_ASSIGN_ROLE,
     AJAX_CREATE_ROLE,
+    AJAX_CREATE_TENANT,
     AJAX_CREATE_USER,
     AJAX_DELETE_ROLE,
+    AJAX_DELETE_TENANT,
     AJAX_DELETE_USER,
     AJAX_GET_CURRENT_USER,
     AJAX_GET_ROLE,
+    AJAX_GET_TENANT,
     AJAX_GET_USER,
     AJAX_LIST_CURRENT_USER_PERMISSIONS,
     AJAX_LIST_ROLE_PERMISSIONS,
     AJAX_LIST_ROLE_USERS,
     AJAX_LIST_ROLES,
+    AJAX_LIST_TENANTS,
     AJAX_LIST_USER_PERMISSIONS,
     AJAX_LIST_USER_ROLES,
     AJAX_LIST_USERS,
     AJAX_REMOVE_ROLE_PERMISSION,
     AJAX_UNASSIGN_ROLE,
     AJAX_UPDATE_ROLE,
+    AJAX_UPDATE_TENANT,
     AJAX_UPDATE_ROLE_PERMISSION,
     AJAX_UPDATE_USER_ADMIN,
     AJAX_UPDATE_USER_PASSWORD,
@@ -245,6 +250,7 @@ from mlflow.server.auth.routes import (
     CREATE_PROMPTLAB_RUN,
     CREATE_REGISTERED_MODEL_PERMISSION,
     CREATE_ROLE,
+    CREATE_TENANT,
     CREATE_SCORER_PERMISSION,
     CREATE_USER,
     CREATE_USER_UI,
@@ -254,6 +260,7 @@ from mlflow.server.auth.routes import (
     DELETE_GATEWAY_SECRET_PERMISSION,
     DELETE_REGISTERED_MODEL_PERMISSION,
     DELETE_ROLE,
+    DELETE_TENANT,
     DELETE_SCORER_PERMISSION,
     DELETE_USER,
     GATEWAY_PROVIDER_CONFIG,
@@ -272,6 +279,7 @@ from mlflow.server.auth.routes import (
     GET_MODEL_VERSION_ARTIFACT,
     GET_REGISTERED_MODEL_PERMISSION,
     GET_ROLE,
+    GET_TENANT,
     GET_SCORER_PERMISSION,
     GET_TRACE_ARTIFACT,
     GET_USER,
@@ -281,6 +289,7 @@ from mlflow.server.auth.routes import (
     LIST_ROLE_PERMISSIONS,
     LIST_ROLE_USERS,
     LIST_ROLES,
+    LIST_TENANTS,
     LIST_USER_PERMISSIONS,
     LIST_USER_ROLES,
     LIST_USERS,
@@ -294,6 +303,7 @@ from mlflow.server.auth.routes import (
     UPDATE_GATEWAY_SECRET_PERMISSION,
     UPDATE_REGISTERED_MODEL_PERMISSION,
     UPDATE_ROLE,
+    UPDATE_TENANT,
     UPDATE_ROLE_PERMISSION,
     UPDATE_SCORER_PERMISSION,
     UPDATE_USER_ADMIN,
@@ -301,6 +311,7 @@ from mlflow.server.auth.routes import (
     UPLOAD_ARTIFACT,
 )
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
+from mlflow.tenant_context import resolve_tenant_slug, reset_active_tenant_slug, set_active_tenant_slug
 from mlflow.server.fastapi_app import create_fastapi_app
 from mlflow.server.handlers import (
     _add_static_prefix,
@@ -2379,6 +2390,13 @@ def _find_validator(req: Request) -> Callable[[], bool] | None:
 
 @catch_mlflow_exception
 def _before_request():
+    # Resolve the active tenant from headers and store it in the ContextVar so
+    # every store call downstream sees the correct tenant without explicit passing.
+    slug = resolve_tenant_slug(dict(request.headers))
+    _tenant_reset_token = set_active_tenant_slug(slug)
+    # Store the token on the request context so _after_request can reset it.
+    request.environ["_mlflow_tenant_reset_token"] = _tenant_reset_token
+
     if is_unprotected_route(request.path):
         return
 
@@ -2404,6 +2422,13 @@ def _before_request():
         if validator := _get_proxy_artifact_validator(request.method, request.view_args):
             if not validator():
                 return make_forbidden_response()
+
+
+def _reset_tenant_context(resp: Response) -> Response:
+    token = request.environ.pop("_mlflow_tenant_reset_token", None)
+    if token is not None:
+        reset_active_tenant_slug(token)
+    return resp
 
 
 def set_can_manage_experiment_permission(resp: Response):
@@ -4186,6 +4211,84 @@ def add_fastapi_permission_middleware(app: FastAPI) -> None:
 
 # Role management routes (RBAC). Each route is exposed at both the REST path (Python
 # client) and the AJAX path (MLflow frontend). Registration loop lives inside create_app.
+def _require_system_admin():
+    """Return a 403 if the caller is not a system-level admin."""
+    if not sender_is_admin():
+        return make_forbidden_response()
+
+
+# ---- Tenant management handlers ----
+
+def create_tenant():
+    slug = _get_request_param("slug")
+    name = _get_request_param("name")
+    storage_root = request.json.get("storage_root") if request.is_json else None
+    max_experiments = request.json.get("max_experiments") if request.is_json else None
+    max_users = request.json.get("max_users") if request.is_json else None
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenant = store.create_tenant(
+        slug=slug,
+        name=name,
+        storage_root=storage_root,
+        max_experiments=max_experiments,
+        max_users=max_users,
+    )
+    return jsonify({"tenant": tenant.to_json()})
+
+
+def get_tenant():
+    slug = _get_request_param("slug")
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenant = store.get_tenant(slug)
+    return jsonify({"tenant": tenant.to_json()})
+
+
+def list_tenants():
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenants = store.list_tenants()
+    return jsonify({"tenants": [t.to_json() for t in tenants]})
+
+
+def update_tenant():
+    slug = _get_request_param("slug")
+    body = request.get_json(silent=True) or {}
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenant = store.update_tenant(
+        slug=slug,
+        name=body.get("name"),
+        storage_root=body.get("storage_root"),
+        max_experiments=body.get("max_experiments"),
+        max_users=body.get("max_users"),
+    )
+    return jsonify({"tenant": tenant.to_json()})
+
+
+def delete_tenant():
+    slug = _get_request_param("slug")
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    store.delete_tenant(slug)
+    return jsonify({})
+
+
+_TENANT_ROUTES: list[tuple[Callable[[], Any], str, str, str]] = [
+    (create_tenant, "POST", CREATE_TENANT, AJAX_CREATE_TENANT),
+    (get_tenant, "GET", GET_TENANT, AJAX_GET_TENANT),
+    (list_tenants, "GET", LIST_TENANTS, AJAX_LIST_TENANTS),
+    (update_tenant, "PATCH", UPDATE_TENANT, AJAX_UPDATE_TENANT),
+    (delete_tenant, "DELETE", DELETE_TENANT, AJAX_DELETE_TENANT),
+]
+
+
 _RBAC_ROUTES: list[tuple[Callable[[], Any], str, str, str]] = [
     (create_role, "POST", CREATE_ROLE, AJAX_CREATE_ROLE),
     (get_role, "GET", GET_ROLE, AJAX_GET_ROLE),
@@ -4443,7 +4546,13 @@ def create_app(app: Flask = app):
         for path in (rest_path, ajax_path):
             app.add_url_rule(rule=path, view_func=view_func, methods=[method])
 
+    # Tenant management routes (multi-tenancy) — see _TENANT_ROUTES at module scope.
+    for view_func, method, rest_path, ajax_path in _TENANT_ROUTES:
+        for path in (rest_path, ajax_path):
+            app.add_url_rule(rule=path, view_func=view_func, methods=[method])
+
     app.before_request(_before_request)
+    app.after_request(_reset_tenant_context)
     app.after_request(_after_request)
 
     if _MLFLOW_SGI_NAME.get() == "uvicorn":

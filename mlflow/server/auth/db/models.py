@@ -1,30 +1,61 @@
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
     String,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
 from mlflow.server.auth.entities import (
     Role,
     RolePermission,
+    Tenant,
     User,
     UserRoleAssignment,
 )
+from mlflow.tenant_context import DEFAULT_TENANT_SLUG
 
 Base = declarative_base()
+
+
+class SqlTenant(Base):
+    __tablename__ = "tenants"
+
+    id = Column(Integer(), primary_key=True)
+    slug = Column(String(63), unique=True, nullable=False)
+    name = Column(String(255), nullable=False)
+    storage_root = Column(String(1024), nullable=True)
+    max_experiments = Column(BigInteger(), nullable=True)
+    max_users = Column(BigInteger(), nullable=True)
+    created_at = Column(DateTime(), nullable=False, server_default=func.now())
+
+    users = relationship("SqlUser", backref="tenant", cascade="all, delete-orphan")
+    roles = relationship("SqlRole", backref="tenant", cascade="all, delete-orphan")
+
+    def to_mlflow_entity(self):
+        return Tenant(
+            id_=self.id,
+            slug=self.slug,
+            name=self.name,
+            storage_root=self.storage_root,
+            max_experiments=self.max_experiments,
+            max_users=self.max_users,
+        )
 
 
 class SqlUser(Base):
     __tablename__ = "users"
     id = Column(Integer(), primary_key=True)
-    username = Column(String(255), unique=True)
+    username = Column(String(255))
     password_hash = Column(String(255))
     is_admin = Column(Boolean, default=False)
+    tenant_id = Column(Integer(), ForeignKey("tenants.id"), nullable=False)
     # Cascade through user_role_assignments so ``session.delete(user)`` cleans
     # up its assignments. Legacy permission tables (experiment_permissions,
     # registered_model_permissions, ...) are retained on disk for rollback
@@ -37,6 +68,10 @@ class SqlUser(Base):
         backref="user",
         foreign_keys="SqlUserRoleAssignment.user_id",
         cascade="all, delete-orphan",
+    )
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "username", name="unique_tenant_username"),
+        Index("idx_users_tenant_id", "tenant_id"),
     )
 
     def to_mlflow_entity(self):
@@ -55,13 +90,15 @@ class SqlRole(Base):
     name = Column(String(255), nullable=False)
     workspace = Column(String(63), nullable=False)
     description = Column(String(1024), nullable=True)
+    tenant_id = Column(Integer(), ForeignKey("tenants.id"), nullable=False)
     permissions = relationship("SqlRolePermission", backref="role", cascade="all, delete-orphan")
     user_assignments = relationship(
         "SqlUserRoleAssignment", backref="role", cascade="all, delete-orphan"
     )
     __table_args__ = (
-        UniqueConstraint("workspace", "name", name="unique_workspace_role_name"),
+        UniqueConstraint("tenant_id", "workspace", "name", name="unique_tenant_workspace_role_name"),
         Index("idx_roles_workspace", "workspace"),
+        Index("idx_roles_tenant_id", "tenant_id"),
     )
 
     def to_mlflow_entity(self):

@@ -19,9 +19,11 @@ from mlflow.server.auth.db import utils as dbutils
 from mlflow.server.auth.db.models import (
     SqlRole,
     SqlRolePermission,
+    SqlTenant,
     SqlUser,
     SqlUserRoleAssignment,
 )
+from mlflow.tenant_context import DEFAULT_TENANT_SLUG, get_active_tenant_slug
 from mlflow.server.auth.entities import (
     ExperimentPermission,
     GatewayEndpointPermission,
@@ -31,6 +33,7 @@ from mlflow.server.auth.entities import (
     Role,
     RolePermission,
     ScorerPermission,
+    Tenant,
     User,
     UserRoleAssignment,
     WorkspacePermission,
@@ -133,6 +136,105 @@ class SqlAlchemyStore:
             SessionMaker = sessionmaker(bind=self.engine)
             self.ManagedSessionMaker = _get_managed_session_maker(SessionMaker, self.db_type)
 
+    # ------------------------------------------------------------------
+    # Tenant CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_tenant_by_slug(session, slug: str) -> SqlTenant:
+        try:
+            return session.query(SqlTenant).filter(SqlTenant.slug == slug).one()
+        except NoResultFound:
+            raise MlflowException(
+                f"Tenant with slug={slug!r} not found",
+                RESOURCE_DOES_NOT_EXIST,
+            )
+
+    def create_tenant(
+        self,
+        slug: str,
+        name: str,
+        storage_root: str | None = None,
+        max_experiments: int | None = None,
+        max_users: int | None = None,
+    ) -> Tenant:
+        if not slug or not name:
+            raise MlflowException.invalid_parameter_value(
+                "slug and name are required to create a tenant."
+            )
+        with self.ManagedSessionMaker(read_only=False) as session:
+            try:
+                tenant = SqlTenant(
+                    slug=slug,
+                    name=name,
+                    storage_root=storage_root,
+                    max_experiments=max_experiments,
+                    max_users=max_users,
+                )
+                session.add(tenant)
+                session.flush()
+                return tenant.to_mlflow_entity()
+            except IntegrityError as e:
+                raise MlflowException(
+                    f"Tenant with slug={slug!r} already exists. Error: {e}",
+                    RESOURCE_ALREADY_EXISTS,
+                ) from e
+
+    def get_tenant(self, slug: str) -> Tenant:
+        with self.ManagedSessionMaker() as session:
+            return self._get_tenant_by_slug(session, slug).to_mlflow_entity()
+
+    def list_tenants(self) -> list[Tenant]:
+        with self.ManagedSessionMaker() as session:
+            return [t.to_mlflow_entity() for t in session.query(SqlTenant).all()]
+
+    def update_tenant(
+        self,
+        slug: str,
+        name: str | None = None,
+        storage_root: str | None = None,
+        max_experiments: int | None = None,
+        max_users: int | None = None,
+    ) -> Tenant:
+        with self.ManagedSessionMaker(read_only=False) as session:
+            tenant = self._get_tenant_by_slug(session, slug)
+            if name is not None:
+                tenant.name = name
+            if storage_root is not None:
+                tenant.storage_root = storage_root
+            if max_experiments is not None:
+                tenant.max_experiments = max_experiments
+            if max_users is not None:
+                tenant.max_users = max_users
+            session.flush()
+            return tenant.to_mlflow_entity()
+
+    def delete_tenant(self, slug: str) -> None:
+        if slug == DEFAULT_TENANT_SLUG:
+            raise MlflowException.invalid_parameter_value(
+                "The default tenant cannot be deleted."
+            )
+        with self.ManagedSessionMaker(read_only=False) as session:
+            tenant = self._get_tenant_by_slug(session, slug)
+            session.delete(tenant)
+
+    def get_or_create_default_tenant(self) -> Tenant:
+        with self.ManagedSessionMaker() as session:
+            tenant = session.query(SqlTenant).filter(
+                SqlTenant.slug == DEFAULT_TENANT_SLUG
+            ).first()
+            if tenant is not None:
+                return tenant.to_mlflow_entity()
+        return self.create_tenant(slug=DEFAULT_TENANT_SLUG, name="Default Tenant")
+
+    # ------------------------------------------------------------------
+    # Tenant-aware helpers used by user/role mutations
+    # ------------------------------------------------------------------
+
+    def _get_active_tenant_id(self, session) -> int:
+        slug = get_active_tenant_slug()
+        return self._get_tenant_by_slug(session, slug).id
+
     def authenticate_user(self, username: str, password: str) -> bool:
         with self.ManagedSessionMaker() as session:
             try:
@@ -146,8 +248,14 @@ class SqlAlchemyStore:
         _validate_password(password)
         pwhash = generate_password_hash(password)
         with self.ManagedSessionMaker(read_only=False) as session:
+            tenant_id = self._get_active_tenant_id(session)
             try:
-                user = SqlUser(username=username, password_hash=pwhash, is_admin=is_admin)
+                user = SqlUser(
+                    username=username,
+                    password_hash=pwhash,
+                    is_admin=is_admin,
+                    tenant_id=tenant_id,
+                )
                 session.add(user)
                 session.flush()
                 return user.to_mlflow_entity()
@@ -157,10 +265,14 @@ class SqlAlchemyStore:
                     RESOURCE_ALREADY_EXISTS,
                 ) from e
 
-    @staticmethod
-    def _get_user(session, username: str) -> SqlUser:
+    def _get_user(self, session, username: str) -> SqlUser:
+        tenant_id = self._get_active_tenant_id(session)
         try:
-            return session.query(SqlUser).filter(SqlUser.username == username).one()
+            return (
+                session.query(SqlUser)
+                .filter(SqlUser.username == username, SqlUser.tenant_id == tenant_id)
+                .one()
+            )
         except NoResultFound:
             raise MlflowException(
                 f"User with username={username} not found",
@@ -174,7 +286,12 @@ class SqlAlchemyStore:
 
     def has_user(self, username: str) -> bool:
         with self.ManagedSessionMaker() as session:
-            return session.query(SqlUser).filter(SqlUser.username == username).first() is not None
+            tenant_id = self._get_active_tenant_id(session)
+            return (
+                session.query(SqlUser)
+                .filter(SqlUser.username == username, SqlUser.tenant_id == tenant_id)
+                .first()
+            ) is not None
 
     def get_user(self, username: str) -> User:
         with self.ManagedSessionMaker() as session:
@@ -182,7 +299,8 @@ class SqlAlchemyStore:
 
     def list_users(self) -> list[User]:
         with self.ManagedSessionMaker() as session:
-            users = session.query(SqlUser).all()
+            tenant_id = self._get_active_tenant_id(session)
+            users = session.query(SqlUser).filter(SqlUser.tenant_id == tenant_id).all()
             return [u.to_mlflow_entity() for u in users]
 
     def list_users_with_roles(self) -> list[tuple[User, list[Role]]]:
@@ -283,27 +401,41 @@ class SqlAlchemyStore:
         # scope and we can recover by re-querying the winner's row. Same pattern for
         # the user->role assignment.
         name = self._synthetic_user_role_name(user_id)
+        tenant_id = self._get_active_tenant_id(session)
         role = (
             session
             .query(SqlRole)
-            .filter(SqlRole.workspace == workspace, SqlRole.name == name)
+            .filter(
+                SqlRole.workspace == workspace,
+                SqlRole.name == name,
+                SqlRole.tenant_id == tenant_id,
+            )
             .first()
         )
         if role is None:
             try:
                 with session.begin_nested():
-                    role = SqlRole(name=name, workspace=workspace, description=None)
+                    role = SqlRole(
+                        name=name,
+                        workspace=workspace,
+                        description=None,
+                        tenant_id=tenant_id,
+                    )
                     session.add(role)
                     session.flush()
             except IntegrityError:
                 # No other-assignee check needed here: the SAVEPOINT only
                 # rolls back when our own INSERT lost the race for the same
-                # ``(workspace, __user_<user_id>__)`` tuple, so the recovered
-                # row is guaranteed to be this user's synthetic role.
+                # ``(tenant_id, workspace, __user_<user_id>__)`` tuple, so the
+                # recovered row is guaranteed to be this user's synthetic role.
                 role = (
                     session
                     .query(SqlRole)
-                    .filter(SqlRole.workspace == workspace, SqlRole.name == name)
+                    .filter(
+                        SqlRole.workspace == workspace,
+                        SqlRole.name == name,
+                        SqlRole.tenant_id == tenant_id,
+                    )
                     .one()
                 )
         else:

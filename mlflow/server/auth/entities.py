@@ -3,6 +3,85 @@ from mlflow.server.auth.permissions import get_permission
 from mlflow.utils.workspace_utils import DEFAULT_WORKSPACE_NAME, resolve_entity_workspace_name
 
 
+class Tenant:
+    def __init__(
+        self,
+        id_,
+        slug,
+        name,
+        storage_root=None,
+        max_experiments=None,
+        max_users=None,
+    ):
+        self._id = id_
+        self._slug = slug
+        self._name = name
+        self._storage_root = storage_root
+        self._max_experiments = max_experiments
+        self._max_users = max_users
+
+    @property
+    def id(self):
+        return self._id
+
+    @property
+    def slug(self):
+        return self._slug
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, name):
+        self._name = name
+
+    @property
+    def storage_root(self):
+        return self._storage_root
+
+    @storage_root.setter
+    def storage_root(self, storage_root):
+        self._storage_root = storage_root
+
+    @property
+    def max_experiments(self):
+        return self._max_experiments
+
+    @max_experiments.setter
+    def max_experiments(self, max_experiments):
+        self._max_experiments = max_experiments
+
+    @property
+    def max_users(self):
+        return self._max_users
+
+    @max_users.setter
+    def max_users(self, max_users):
+        self._max_users = max_users
+
+    def to_json(self):
+        return {
+            "id": self.id,
+            "slug": self.slug,
+            "name": self.name,
+            "storage_root": self.storage_root,
+            "max_experiments": self.max_experiments,
+            "max_users": self.max_users,
+        }
+
+    @classmethod
+    def from_json(cls, dictionary):
+        return cls(
+            id_=dictionary["id"],
+            slug=dictionary["slug"],
+            name=dictionary["name"],
+            storage_root=dictionary.get("storage_root"),
+            max_experiments=dictionary.get("max_experiments"),
+            max_users=dictionary.get("max_users"),
+        )
+
+
 class User:
     def __init__(
         self,

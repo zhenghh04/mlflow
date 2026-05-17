@@ -112,6 +112,18 @@ AJAX_LIST_USER_ROLES = _get_ajax_path("/mlflow/users/roles/list", version=3)
 LIST_ROLE_USERS = _get_rest_path("/mlflow/roles/users/list", version=3)
 AJAX_LIST_ROLE_USERS = _get_ajax_path("/mlflow/roles/users/list", version=3)
 
+# Tenant management routes (multi-tenancy)
+CREATE_TENANT = _get_rest_path("/mlflow/tenants/create", version=3)
+AJAX_CREATE_TENANT = _get_ajax_path("/mlflow/tenants/create", version=3)
+GET_TENANT = _get_rest_path("/mlflow/tenants/get", version=3)
+AJAX_GET_TENANT = _get_ajax_path("/mlflow/tenants/get", version=3)
+LIST_TENANTS = _get_rest_path("/mlflow/tenants/list", version=3)
+AJAX_LIST_TENANTS = _get_ajax_path("/mlflow/tenants/list", version=3)
+UPDATE_TENANT = _get_rest_path("/mlflow/tenants/update", version=3)
+AJAX_UPDATE_TENANT = _get_ajax_path("/mlflow/tenants/update", version=3)
+DELETE_TENANT = _get_rest_path("/mlflow/tenants/delete", version=3)
+AJAX_DELETE_TENANT = _get_ajax_path("/mlflow/tenants/delete", version=3)
+
 # Gateway AJAX-only routes
 GATEWAY_SUPPORTED_PROVIDERS = _get_ajax_path("/mlflow/gateway/supported-providers", version=3)
 GATEWAY_SUPPORTED_MODELS = _get_ajax_path("/mlflow/gateway/supported-models", version=3)

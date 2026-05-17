@@ -69,6 +69,7 @@ from mlflow.utils.validation import (
     _validate_webhook_url,
 )
 from mlflow.utils.workspace_utils import DEFAULT_WORKSPACE_NAME
+from mlflow.tenant_context import get_active_tenant_slug
 
 _logger = logging.getLogger(__name__)
 
@@ -404,6 +405,7 @@ class SqlAlchemyStore(AbstractStore):
                         creation_time=creation_time,
                         last_updated_time=creation_time,
                         description=description,
+                        tenant=get_active_tenant_slug(),
                     )
                 )
                 tags_dict = {}
@@ -435,7 +437,10 @@ class SqlAlchemyStore(AbstractStore):
         query = self._get_query(session, SqlRegisteredModel)
         if eager:
             query = query.options(*self._get_eager_registered_model_query_options())
-        rms = query.filter(SqlRegisteredModel.name == name).all()
+        rms = query.filter(
+            SqlRegisteredModel.name == name,
+            SqlRegisteredModel.tenant == get_active_tenant_slug(),
+        ).all()
         if len(rms) == 0:
             raise MlflowException(
                 f"Registered Model with name={name} not found", RESOURCE_DOES_NOT_EXIST
