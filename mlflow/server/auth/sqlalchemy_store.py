@@ -322,14 +322,16 @@ class SqlAlchemyStore:
 
     def list_users_with_roles(self) -> list[tuple[User, list[Role]]]:
         """
-        Return every user paired with their role assignments. Eager-loads
-        assignments / roles / role-permissions in batched queries so the admin
-        Users tab can render per-user role info without N per-row requests.
+        Return every user in the active tenant paired with their role assignments.
+        Eager-loads assignments / roles / role-permissions in batched queries so the
+        admin Users tab can render per-user role info without N per-row requests.
         """
         with self.ManagedSessionMaker() as session:
+            tenant_id = self._get_active_tenant_id(session)
             users = (
                 session
                 .query(SqlUser)
+                .filter(SqlUser.tenant_id == tenant_id)
                 .options(
                     selectinload(SqlUser.user_role_assignments)
                     .selectinload(SqlUserRoleAssignment.role)
