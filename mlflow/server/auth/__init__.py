@@ -2394,19 +2394,29 @@ def get_auth_func(authorization_function: str) -> Callable[[], Authorization | R
 
 
 def _authenticate_sso_token() -> Authorization | None:
-    """Check for an SSO JWT token in the request cookie.
+    """Check for an SSO session token and return a synthetic Authorization.
 
-    Returns a synthetic Authorization object if valid, None otherwise.
+    Checks two sources (first match wins):
+    1. X-SSO-Token header — set explicitly by FetchUtils reading the
+       mlflow-request-header-X-SSO-Token cookie; reliable for all AJAX calls.
+    2. mlflow_sso_token cookie — fallback for non-FetchUtils requests
+       (e.g. server-rendered pages, curl).
     """
-    token = request.cookies.get(SSO_TOKEN_COOKIE, "")
+    secret_key = app.secret_key or ""
+
+    # 1. Explicit header (FetchUtils-forwarded cookie)
+    token = request.headers.get("X-SSO-Token", "")
+    if not token:
+        # 2. Implicit cookie (browser automatic)
+        token = request.cookies.get(SSO_TOKEN_COOKIE, "")
+
     if not token:
         return None
-    secret_key = app.secret_key or ""
+
     username = verify_session_token(token, secret_key)
     if not username:
         return None
-    # Build a synthetic Authorization object so the rest of the middleware
-    # works without modification.
+
     from werkzeug.datastructures import Authorization as WerkzeugAuth
     return WerkzeugAuth("sso", {"username": username, "password": ""})
 
@@ -2659,11 +2669,18 @@ def sso_callback(provider_id: str):
     secret_key = app.secret_key or ""
     token = issue_session_token(username, secret_key)
 
-    # Redirect to the SPA root with the session JWT in a cookie
+    # Redirect to the SPA root.  Set the token in TWO cookies:
+    #  1. mlflow_sso_token  — read by _authenticate_sso_token() server-side
+    #  2. mlflow-request-header-X-SSO-Token — picked up by FetchUtils and
+    #     forwarded as the X-SSO-Token HTTP header on every AJAX request,
+    #     giving the server an explicit (not implicit) auth signal regardless
+    #     of browser SameSite handling.
     resp = make_response()
     resp.status_code = 302
     resp.headers["Location"] = "/"
     resp.set_cookie(SSO_TOKEN_COOKIE, token, max_age=43200, httponly=False, samesite="Lax")
+    resp.set_cookie("mlflow-request-header-X-SSO-Token", token,
+                    max_age=43200, httponly=False, samesite="Lax")
     return resp
 
 
