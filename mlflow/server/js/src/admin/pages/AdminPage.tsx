@@ -37,6 +37,7 @@ import {
   useDeleteUser,
   useRolesQuery,
   useDeleteRole,
+  useUpdateAdmin,
   useWithSettingsReturnTo,
   useTeamMembersQuery,
   useAddTeamMember,
@@ -56,6 +57,114 @@ import {
 const TEAM_ROLES = ['member', 'admin'] as const;
 
 /** Inline sub-section for managing active-team members. */
+/**
+ * Shows every user in the system and lets system admins promote/demote the
+ * global-admin flag (users.is_admin).  Visible only to is_global_admin users.
+ */
+const GlobalAdminsSection = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data: usersData, isLoading } = useUsersQuery();
+  const { data: currentUserData } = useCurrentUserQuery();
+  const updateAdmin = useUpdateAdmin();
+
+  const currentUsername = currentUserData?.user?.username;
+  const users = useMemo(() => usersData?.users ?? [], [usersData]);
+
+  const toggleAdmin = async (username: string, makeAdmin: boolean) => {
+    await updateAdmin.mutateAsync({ username, is_admin: makeAdmin });
+  };
+
+  return (
+    <div
+      css={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: theme.spacing.sm,
+        padding: theme.spacing.md,
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.general.borderRadiusBase,
+        backgroundColor: theme.colors.backgroundSecondary,
+      }}
+    >
+      <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+        <Typography.Title level={4} withoutMargins>
+          <FormattedMessage defaultMessage="Global Admins" description="Global admins section title" />
+        </Typography.Title>
+        <Tag componentId="admin.global_admins.badge" color="indigo">
+          <FormattedMessage defaultMessage="Full system control" description="Global admin badge" />
+        </Tag>
+      </div>
+      <Typography.Hint>
+        <FormattedMessage
+          defaultMessage="Global admins have full control across all teams — they can access any team, manage users, and delete tenants."
+          description="Global admins explanation"
+        />
+      </Typography.Hint>
+      {isLoading ? (
+        <Spinner size="small" />
+      ) : (
+        <Table
+          scrollable
+          noMinHeight
+          css={{
+            border: `1px solid ${theme.colors.border}`,
+            borderRadius: theme.general.borderRadiusBase,
+            overflow: 'hidden',
+          }}
+        >
+          <TableRow isHeader>
+            <TableHeader componentId="admin.global_admins.username_header" css={{ flex: 2 }}>
+              <FormattedMessage defaultMessage="Username" description="Global admins table username header" />
+            </TableHeader>
+            <TableHeader componentId="admin.global_admins.status_header" css={{ flex: 2 }}>
+              <FormattedMessage defaultMessage="Status" description="Global admins table status header" />
+            </TableHeader>
+            <TableHeader componentId="admin.global_admins.actions_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Actions" description="Global admins table actions header" />
+            </TableHeader>
+          </TableRow>
+          {users.map((user) => (
+            <TableRow key={user.username}>
+              <TableCell css={{ flex: 2 }}>
+                <Typography.Text>{user.username}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>
+                {user.is_admin ? (
+                  <Tag componentId="admin.global_admins.admin_tag" color="indigo">
+                    <FormattedMessage defaultMessage="Global Admin" description="Global admin tag" />
+                  </Tag>
+                ) : (
+                  <Typography.Text color="secondary">
+                    <FormattedMessage defaultMessage="Regular user" description="Regular user label" />
+                  </Typography.Text>
+                )}
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                {user.username !== currentUsername && (
+                  <Button
+                    componentId="admin.global_admins.toggle_button"
+                    type={user.is_admin ? 'tertiary' : 'primary'}
+                    danger={user.is_admin}
+                    size="small"
+                    loading={updateAdmin.isLoading}
+                    onClick={() => toggleAdmin(user.username, !user.is_admin)}
+                  >
+                    {user.is_admin ? (
+                      <FormattedMessage defaultMessage="Revoke" description="Revoke global admin button" />
+                    ) : (
+                      <FormattedMessage defaultMessage="Make Global Admin" description="Promote to global admin button" />
+                    )}
+                  </Button>
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </Table>
+      )}
+    </div>
+  );
+};
+
 const TeamMembersSection = () => {
   const { theme } = useDesignSystemTheme();
   const { data, isLoading } = useTeamMembersQuery();
@@ -278,8 +387,11 @@ const UsersTab = () => {
       />
     ) : null;
 
+  const isGlobalAdmin = Boolean(currentUserData?.user?.is_global_admin ?? currentUserData?.user?.is_admin);
+
   return (
     <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      {isGlobalAdmin && <GlobalAdminsSection />}
       <TeamMembersSection />
       {error && (
         <Alert componentId="admin.users.error" type="error" message={error} closable onClose={() => setError(null)} />

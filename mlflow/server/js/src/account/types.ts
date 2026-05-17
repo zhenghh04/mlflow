@@ -1,7 +1,12 @@
 export interface User {
   id: number;
   username: string;
+  /** True if the user is a global admin OR a team admin in the active team. */
   is_admin: boolean;
+  /** True only for the system-level global admin (users.is_admin in DB). */
+  is_global_admin?: boolean;
+  /** The user's role in the active team: 'admin' | 'member' | null. */
+  team_role?: string | null;
   /**
    * Roles the requester is authorized to see for this user. The backend
    * scopes the list per-requester (admin sees every role; workspace

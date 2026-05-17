@@ -3319,8 +3319,17 @@ def get_current_user():
     username = authenticate_request().username
     user = store.get_user(username)
     is_basic_auth = auth_config.authorization_function == DEFAULT_AUTHORIZATION_FUNCTION
+    # Include team_role so the frontend can gate team-admin affordances (e.g.
+    # the Manage link in the sidebar) without a separate request.
+    team_role = store.get_team_role(username)
     return jsonify({
-        "user": {"id": user.id, "username": user.username, "is_admin": user.is_admin},
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "is_admin": user.is_admin or team_role == "admin",
+            "is_global_admin": user.is_admin,
+            "team_role": team_role,
+        },
         "is_basic_auth": is_basic_auth,
     })
 
