@@ -192,9 +192,19 @@ class SqlAlchemyStore(AbstractStore):
         query = session.query(model)
         if model in _WORKSPACE_MODELS:
             query = query.filter(model.workspace == self._get_active_workspace())
-        # Apply tenant filter for models that carry the tenant column.
+        # Tenant filter: show records belonging to the active tenant OR marked public.
         if hasattr(model, "tenant"):
-            query = query.filter(model.tenant == get_active_tenant_slug())
+            active_tenant = get_active_tenant_slug()
+            if hasattr(model, "visibility"):
+                import sqlalchemy as sa_local
+                query = query.filter(
+                    sa_local.or_(
+                        model.tenant == active_tenant,
+                        model.visibility == "public",
+                    )
+                )
+            else:
+                query = query.filter(model.tenant == active_tenant)
         return query
 
     def _with_workspace_field(self, instance):
@@ -408,6 +418,7 @@ class SqlAlchemyStore(AbstractStore):
                         last_updated_time=creation_time,
                         description=description,
                         tenant=get_active_tenant_slug(),
+                        visibility="team",
                     )
                 )
                 tags_dict = {}
@@ -453,6 +464,38 @@ class SqlAlchemyStore(AbstractStore):
                 INVALID_STATE,
             )
         return rms[0]
+
+    def set_model_visibility(self, name: str, visibility: str) -> None:
+        """Set visibility of a registered model to 'team' or 'public'.
+
+        'team'   — visible only to members of the owning tenant.
+        'public' — visible (read-only) to any authenticated user across all teams.
+        Only the owning tenant's admin or a user with MANAGE permission may call this.
+        """
+        if visibility not in ("team", "public"):
+            raise MlflowException(
+                f"Invalid visibility '{visibility}'. Must be 'team' or 'public'.",
+                INVALID_PARAMETER_VALUE,
+            )
+        with self.ManagedSessionMaker(read_only=False) as session:
+            # Use a direct query scoped only to the owning tenant (not public-aware)
+            # so the caller can only change models they actually own.
+            rm = (
+                session.query(SqlRegisteredModel)
+                .filter(
+                    SqlRegisteredModel.name == name,
+                    SqlRegisteredModel.tenant == get_active_tenant_slug(),
+                )
+                .first()
+            )
+            if rm is None:
+                raise MlflowException(
+                    f"Registered model '{name}' not found in the active team.",
+                    RESOURCE_DOES_NOT_EXIST,
+                )
+            rm.visibility = visibility
+            rm.last_updated_time = get_current_time_millis()
+            session.flush()
 
     def update_registered_model(self, name, description, deployment_job_id=None):
         """
@@ -638,9 +681,14 @@ class SqlAlchemyStore(AbstractStore):
 
         attribute_filters.extend(self._get_workspace_clauses(SqlRegisteredModel))
 
+        active_tenant = get_active_tenant_slug()
         rm_query = select(SqlRegisteredModel).filter(
             *attribute_filters,
-            SqlRegisteredModel.tenant == get_active_tenant_slug(),
+            # A model is visible when it belongs to the active tenant OR is public.
+            sqlalchemy.or_(
+                SqlRegisteredModel.tenant == active_tenant,
+                SqlRegisteredModel.visibility == "public",
+            ),
         )
 
         if not self._is_querying_prompt(parsed_filters):

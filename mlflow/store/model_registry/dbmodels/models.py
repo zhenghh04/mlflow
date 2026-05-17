@@ -55,6 +55,14 @@ class SqlRegisteredModel(Base):
         server_default=sa.text("'default'"),
     )
 
+    visibility = Column(
+        String(16),
+        nullable=False,
+        default="team",
+        server_default=sa.text("'team'"),
+    )
+    """Visibility scope: 'team' (default, tenant-private) or 'public' (any authenticated user)."""
+
     creation_time = Column(BigInteger, default=get_current_time_millis)
 
     last_updated_time = Column(BigInteger, nullable=True, default=None)

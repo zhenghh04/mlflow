@@ -53,6 +53,8 @@ import {
   useCreateExperiment,
   useDeleteExperiment,
   useRenameExperiment,
+  useRegisteredModelsQuery,
+  useSetModelVisibility,
 } from '../hooks';
 
 const TEAM_ROLES = ['member', 'admin'] as const;
@@ -1049,6 +1051,142 @@ const ProjectsTab = () => {
   );
 };
 
+const ModelsTab = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading, error } = useRegisteredModelsQuery();
+  const setVisibility = useSetModelVisibility();
+  const isAdmin = useCurrentUserIsAdmin();
+
+  const models = useMemo(() => (data as any)?.models ?? [], [data]);
+
+  const handleToggle = async (name: string, current: string) => {
+    const next = current === 'public' ? 'team' : 'public';
+    await setVisibility.mutateAsync({ name, visibility: next as 'team' | 'public' });
+  };
+
+  if (isLoading) {
+    return (
+      <div css={{ display: 'flex', justifyContent: 'center', padding: theme.spacing.lg }}>
+        <Spinner size="small" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <Alert
+        componentId="admin.models.error"
+        type="error"
+        message="Failed to load models"
+        description={(error as Error)?.message}
+      />
+    );
+  }
+
+  const emptyState =
+    models.length === 0 ? (
+      <Empty
+        title={<FormattedMessage defaultMessage="No registered models" description="Empty state for models table" />}
+        description={
+          <FormattedMessage
+            defaultMessage="Register a model from a training run to see it here."
+            description="Empty state description for models table"
+          />
+        }
+      />
+    ) : null;
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      <div
+        css={{
+          padding: theme.spacing.sm,
+          backgroundColor: theme.colors.backgroundSecondary,
+          borderRadius: theme.general.borderRadiusBase,
+        }}
+      >
+        <Typography.Hint>
+          <FormattedMessage
+            defaultMessage="Public models are readable by any authenticated user across all teams. Team-private models are visible only to members of the owning team."
+            description="Model visibility explanation"
+          />
+        </Typography.Hint>
+      </div>
+      <Table
+        scrollable
+        noMinHeight
+        empty={emptyState}
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="admin.models.name_header" css={{ flex: 3 }}>
+            <FormattedMessage defaultMessage="Model name" description="Models table name header" />
+          </TableHeader>
+          <TableHeader componentId="admin.models.versions_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="Versions" description="Models table versions header" />
+          </TableHeader>
+          <TableHeader componentId="admin.models.visibility_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Visibility" description="Models table visibility header" />
+          </TableHeader>
+          {isAdmin && (
+            <TableHeader componentId="admin.models.actions_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Actions" description="Models table actions header" />
+            </TableHeader>
+          )}
+        </TableRow>
+        {models.map((model: { name: string; visibility?: string; version_count?: number; tenant?: string }) => {
+          const visibility = model.visibility ?? 'team';
+          const isPublic = visibility === 'public';
+          return (
+            <TableRow key={model.name}>
+              <TableCell css={{ flex: 3 }}>
+                <Typography.Text bold>{model.name}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                <Typography.Text color="secondary">
+                  {model.version_count ?? 0}
+                </Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>
+                <Tag
+                  componentId="admin.models.visibility_tag"
+                  color={isPublic ? 'turquoise' : 'default'}
+                >
+                  {isPublic ? (
+                    <FormattedMessage defaultMessage="Public 🌐" description="Public model visibility tag" />
+                  ) : (
+                    <FormattedMessage defaultMessage="Team only 🔒" description="Team-private model visibility tag" />
+                  )}
+                </Tag>
+              </TableCell>
+              {isAdmin && (
+                <TableCell css={{ flex: 1 }}>
+                  <Button
+                    componentId="admin.models.toggle_visibility"
+                    type="tertiary"
+                    size="small"
+                    loading={setVisibility.isLoading}
+                    onClick={() => handleToggle(model.name, visibility)}
+                  >
+                    {isPublic ? (
+                      <FormattedMessage defaultMessage="Make private" description="Make model team-private button" />
+                    ) : (
+                      <FormattedMessage defaultMessage="Make public" description="Make model public button" />
+                    )}
+                  </Button>
+                </TableCell>
+              )}
+            </TableRow>
+          );
+        })}
+      </Table>
+    </div>
+  );
+};
+
 const AdminPage = () => {
   const { theme } = useDesignSystemTheme();
   // Reflect the active tab in the URL (?tab=users|roles) so deep links — e.g.
@@ -1056,7 +1194,11 @@ const AdminPage = () => {
   // expected tab and a refresh preserves it.
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
-  const activeTab = tabFromUrl === 'roles' ? 'roles' : tabFromUrl === 'projects' ? 'projects' : 'users';
+  const activeTab =
+    tabFromUrl === 'roles' ? 'roles'
+    : tabFromUrl === 'projects' ? 'projects'
+    : tabFromUrl === 'models' ? 'models'
+    : 'users';
 
   const activeWorkspace = useActiveWorkspace();
   // Mode is path-driven, not role-driven: ``/admin`` is the cross-workspace
@@ -1139,6 +1281,9 @@ const AdminPage = () => {
             <Tabs.Trigger value="projects">
               <FormattedMessage defaultMessage="Projects" description="Admin projects tab" />
             </Tabs.Trigger>
+            <Tabs.Trigger value="models">
+              <FormattedMessage defaultMessage="Models" description="Admin models tab" />
+            </Tabs.Trigger>
             <Tabs.Trigger value="roles">
               <FormattedMessage defaultMessage="Roles" description="Admin roles tab" />
             </Tabs.Trigger>
@@ -1148,6 +1293,9 @@ const AdminPage = () => {
           </Tabs.Content>
           <Tabs.Content value="projects" css={{ paddingTop: theme.spacing.md }}>
             <ProjectsTab />
+          </Tabs.Content>
+          <Tabs.Content value="models" css={{ paddingTop: theme.spacing.md }}>
+            <ModelsTab />
           </Tabs.Content>
           <Tabs.Content value="roles" css={{ paddingTop: theme.spacing.md }}>
             <RolesTab />

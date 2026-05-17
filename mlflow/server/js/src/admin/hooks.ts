@@ -486,3 +486,29 @@ export const useUpdateExperimentPermission = () => {
     },
   });
 };
+
+// ---- Model visibility ----
+
+export const AdminModelQueryKeys = {
+  models: ['admin_models'] as const,
+};
+
+export const useRegisteredModelsQuery = () => {
+  return useQuery({
+    queryKey: AdminModelQueryKeys.models,
+    queryFn: AdminApi.listModelsAdmin,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useSetModelVisibility = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, visibility }: { name: string; visibility: 'team' | 'public' }) =>
+      AdminApi.setModelVisibility(name, visibility),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminModelQueryKeys.models });
+    },
+  });
+};

@@ -406,6 +406,30 @@ export const AdminApi = {
     }) as Promise<{ experiment_permission?: { permission: string } }>;
   },
 
+  setModelVisibility: (name: string, visibility: 'team' | 'public') => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/registered-models/set-visibility',
+      method: 'POST',
+      body: JSON.stringify({ name, visibility }),
+      error: defaultErrorHandler,
+    }) as Promise<{ name: string; visibility: string }>;
+  },
+
+  listRegisteredModels: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/registered-models/search?max_results=1000',
+      error: defaultErrorHandler,
+    }) as Promise<{ registered_models?: { name: string; visibility?: string; latest_versions: { version: string; current_stage: string }[] }[] }>;
+  },
+
+  /** Admin-only: list models with visibility from our custom endpoint. */
+  listModelsAdmin: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/registered-models/list-admin',
+      error: defaultErrorHandler,
+    }) as Promise<{ models?: { name: string; visibility: string; tenant: string; version_count: number }[] }>;
+  },
+
   renameExperiment: (experimentId: string, newName: string) => {
     return fetchEndpoint({
       relativeUrl: 'ajax-api/2.0/mlflow/experiments/update',

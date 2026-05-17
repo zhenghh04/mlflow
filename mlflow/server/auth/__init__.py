@@ -2488,6 +2488,91 @@ def delete_can_manage_registered_model_permission(resp: Response):
     store.delete_grants_for_resource("registered_model", name, workspace_scoped=True)
 
 
+# ---- Model visibility handler ----
+
+@app.route("/ajax-api/2.0/mlflow/registered-models/list-admin", methods=["GET"])
+@catch_mlflow_exception
+def list_models_admin():
+    """Return registered models with visibility for the admin panel."""
+    import sqlalchemy
+    store_obj = _get_model_registry_store()
+    # Direct DB query to get visibility (not exposed in standard proto).
+    from mlflow.store.model_registry.dbmodels.models import SqlRegisteredModel, SqlModelVersion
+    from mlflow.tenant_context import get_active_tenant_slug
+    with store_obj.ManagedSessionMaker() as session:
+        rows = (
+            session.query(
+                SqlRegisteredModel.name,
+                SqlRegisteredModel.visibility,
+                SqlRegisteredModel.tenant,
+            )
+            .filter(
+                sqlalchemy.or_(
+                    SqlRegisteredModel.tenant == get_active_tenant_slug(),
+                    SqlRegisteredModel.visibility == "public",
+                )
+            )
+            .all()
+        )
+        # Count versions per model
+        version_counts = dict(
+            session.query(SqlModelVersion.name, sqlalchemy.func.count(SqlModelVersion.version))
+            .filter(SqlModelVersion.name.in_([r[0] for r in rows]))
+            .group_by(SqlModelVersion.name)
+            .all()
+        )
+    return jsonify({
+        "models": [
+            {
+                "name": name,
+                "visibility": vis,
+                "tenant": tenant,
+                "version_count": version_counts.get(name, 0),
+            }
+            for name, vis, tenant in rows
+        ]
+    })
+
+
+@app.route("/api/2.0/mlflow/registered-models/set-visibility", methods=["POST"])
+@app.route("/ajax-api/2.0/mlflow/registered-models/set-visibility", methods=["POST"])
+@catch_mlflow_exception
+def set_model_visibility_handler():
+    """Set a registered model's visibility to 'team' or 'public'.
+
+    Body: { "name": "<model>", "visibility": "team" | "public" }
+    Requires MANAGE permission on the model or team-admin status.
+    """
+    body = request.get_json(silent=True) or {}
+    name = body.get("name", "")
+    visibility = body.get("visibility", "")
+    if not name:
+        return make_response(jsonify({"message": "name is required"}), 400)
+    if visibility not in ("team", "public"):
+        return make_response(jsonify({"message": "visibility must be 'team' or 'public'"}), 400)
+
+    # Permission check: MANAGE on this model OR team admin.
+    # Re-use _get_permission_from_registered_model_name but pull name from the
+    # body we already parsed (the helper reads from request params by default).
+    if not sender_is_admin():
+        username = authenticate_request().username
+        perm = _get_role_permission_or_default(
+            _role_permission_for(
+                username=username,
+                resource_type="registered_model",
+                resource_key=name,
+                workspace_lookup_id=name,
+                workspace_fetcher=_get_model_registry_store().get_registered_model,
+                workspace_label="registered model",
+            )
+        )
+        if not perm.can_manage:
+            return make_forbidden_response()
+
+    _get_model_registry_store().set_model_visibility(name, visibility)
+    return jsonify({"name": name, "visibility": visibility})
+
+
 # ---- Role management handlers (RBAC) ----
 
 
