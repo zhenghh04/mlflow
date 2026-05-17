@@ -2419,6 +2419,14 @@ def _authenticate_sso_token() -> Authorization | None:
     if not username:
         return None
 
+    # Reject tokens for users that no longer exist (e.g. deleted accounts).
+    # This makes the auth fall through to Basic Auth rather than returning a
+    # synthetic Authorization that then fails the team-membership check with a
+    # confusing 403 instead of a clean 401 / redirect-to-login.
+    if not store.has_user(username):
+        _logger.warning("SSO token for unknown user %r — treating as unauthenticated", username)
+        return None
+
     from werkzeug.datastructures import Authorization as WerkzeugAuth
     return WerkzeugAuth("sso", {"username": username, "password": ""})
 
@@ -2516,15 +2524,26 @@ def _before_request():
             INTERNAL_ERROR,
         )
 
-    # Team membership check: the user must be a member of the requested team
-    # (system admins bypass this check via is_team_member returning True for is_admin).
+    # Team membership check: the user must be a member of the requested team.
+    # Global admins (user.is_admin=True) bypass this — is_team_member returns
+    # True for them regardless of explicit membership rows.
     username = authorization.username
     from mlflow.tenant_context import DEFAULT_TENANT_SLUG as _DEFAULT_SLUG
-    if slug != _DEFAULT_SLUG and not store.is_team_member(username, slug):
-        return make_forbidden_response()
+
+    # Fast-path: check admin status first to avoid an extra DB round-trip for
+    # the membership query.
+    try:
+        user = store.get_user(username)
+        is_global_admin = user.is_admin
+    except Exception:
+        is_global_admin = False
+
+    if not is_global_admin:
+        if slug != _DEFAULT_SLUG and not store.is_team_member(username, slug):
+            return make_forbidden_response()
 
     # admins (system or team) don't need further authorization
-    if sender_is_admin():
+    if is_global_admin or sender_is_admin():
         return
 
     # authorization
