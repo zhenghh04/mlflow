@@ -522,7 +522,9 @@ def make_basic_auth_response() -> Response:
         "on how to authenticate."
     )
     res.status_code = 401
-    res.headers["WWW-Authenticate"] = 'Basic realm="mlflow"'
+    # Do NOT send WWW-Authenticate: Basic — that header triggers the browser's
+    # native username/password dialog which we want to replace with our own
+    # login page.  API clients (curl -u, Python SDK) handle 401 fine without it.
     return res
 
 
@@ -4663,7 +4665,7 @@ def add_fastapi_permission_middleware(app: FastAPI) -> None:
                 "https://www.mlflow.org/docs/latest/auth/index.html#authenticating-to-mlflow "
                 "on how to authenticate.",
                 status_code=HTTPStatus.UNAUTHORIZED,
-                headers={"WWW-Authenticate": 'Basic realm="mlflow"'},
+                # No WWW-Authenticate header — prevents browser native auth dialog
             )
 
         # Store user info in request state for downstream handlers (e.g., gateway tracing)
