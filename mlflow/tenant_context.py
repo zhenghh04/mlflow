@@ -36,15 +36,20 @@ def reset_active_tenant_slug(token: object) -> None:
 
 
 def resolve_tenant_slug(request_headers: dict[str, str]) -> str:
-    """Derive tenant slug from HTTP headers."""
-    if slug := request_headers.get(_TENANT_HEADER, "").strip():
+    """Derive tenant slug from HTTP headers (header lookup is case-insensitive)."""
+    # HTTP headers are case-insensitive; normalise the lookup to handle both
+    # Flask's title-cased keys (X-Mlflow-Tenant) and the canonical form.
+    header_lower = {k.lower(): v for k, v in request_headers.items()}
+    if slug := header_lower.get(_TENANT_HEADER.lower(), "").strip():
         return slug
 
     host = request_headers.get("Host", "").split(":")[0]
     parts = host.split(".")
     # Require at least 4 parts (tenant.service.domain.tld) to avoid treating the
     # service hostname itself (mlflow.example.com) as a tenant subdomain.
-    if len(parts) >= 4:
+    # Skip pure IPv4 addresses (all-numeric octets like 127.0.0.1).
+    is_ipv4 = len(parts) == 4 and all(p.isdigit() for p in parts)
+    if len(parts) >= 4 and not is_ipv4:
         candidate = parts[0]
         if candidate and candidate != "www":
             return candidate

@@ -448,14 +448,14 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
                     error_code=INVALID_STATE,
                 )
 
-        try:
-            self.get_experiment(str(self.DEFAULT_EXPERIMENT_ID))
-        except MlflowException as exc:
-            if exc.error_code and exc.error_code != ErrorCode.Name(RESOURCE_DOES_NOT_EXIST):
-                raise
-            # Default experiment doesn't exist, create it
-            with self.ManagedSessionMaker(read_only=False) as session:
-                self._create_default_experiment(session)
+        # Check for the default experiment (id=0) globally across all tenants.
+        # We bypass _experiment_where_clauses() intentionally here because
+        # experiment_id=0 is a shared system experiment — it must exist once in
+        # the DB regardless of which tenant the current request belongs to.
+        with self.ManagedSessionMaker() as session:
+            if not self._experiment_exists_globally(session, int(self.DEFAULT_EXPERIMENT_ID)):
+                with self.ManagedSessionMaker(read_only=False) as write_session:
+                    self._create_default_experiment(write_session)
 
     def _get_dialect(self):
         return self.engine.dialect.name
@@ -516,6 +516,9 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
             session.execute(
                 sql.text(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values});")
             )
+        except IntegrityError:
+            # Another worker/process already created experiment 0 — safe to ignore.
+            pass
         finally:
             self._unset_zero_value_insertion_for_autoincrement_column(session)
 
@@ -760,6 +763,14 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
     def _experiment_where_clauses(self):
         """Return tenant-scoping clause for all experiment queries."""
         return [SqlExperiment.tenant == get_active_tenant_slug()]
+
+    def _experiment_exists_globally(self, session, experiment_id: int) -> bool:
+        """Check whether an experiment exists in ANY tenant (used for the default experiment)."""
+        return (
+            session.query(SqlExperiment.experiment_id)
+            .filter(SqlExperiment.experiment_id == experiment_id)
+            .first()
+        ) is not None
 
     def _filter_experiment_ids(self, session, experiment_ids):
         """

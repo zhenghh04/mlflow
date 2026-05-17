@@ -266,23 +266,40 @@ class SqlAlchemyStore:
                 ) from e
 
     def _get_user(self, session, username: str) -> SqlUser:
-        tenant_id = self._get_active_tenant_id(session)
-        try:
-            return (
-                session.query(SqlUser)
-                .filter(SqlUser.username == username, SqlUser.tenant_id == tenant_id)
-                .one()
-            )
-        except NoResultFound:
+        """Look up a user in the active tenant.
+
+        System admins in the default tenant can operate across all tenants:
+        if the user is not found in the active tenant, fall back to the default
+        tenant and accept the match only when the user has is_admin=True.  This
+        lets a single admin account manage every tenant without being created in
+        each one.
+        """
+        active_tenant_id = self._get_active_tenant_id(session)
+        user = (
+            session.query(SqlUser)
+            .filter(SqlUser.username == username, SqlUser.tenant_id == active_tenant_id)
+            .first()
+        )
+        if user is None:
+            default_tenant_id = self._get_tenant_by_slug(session, DEFAULT_TENANT_SLUG).id
+            if default_tenant_id != active_tenant_id:
+                candidate = (
+                    session.query(SqlUser)
+                    .filter(
+                        SqlUser.username == username,
+                        SqlUser.tenant_id == default_tenant_id,
+                        SqlUser.is_admin.is_(True),
+                    )
+                    .first()
+                )
+                if candidate is not None:
+                    user = candidate
+        if user is None:
             raise MlflowException(
                 f"User with username={username} not found",
                 RESOURCE_DOES_NOT_EXIST,
             )
-        except MultipleResultsFound:
-            raise MlflowException(
-                f"Found multiple users with username={username}",
-                INVALID_STATE,
-            )
+        return user
 
     def has_user(self, username: str) -> bool:
         with self.ManagedSessionMaker() as session:
