@@ -437,6 +437,13 @@ export const AdminApi = {
       error: defaultErrorHandler,
     }) as Promise<{ tenant: { slug: string; name: string } }>,
 
+  /** System-wide list of global admins (is_admin=true), not team-scoped. */
+  listGlobalAdmins: () =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/users/global-admins',
+      error: defaultErrorHandler,
+    }) as Promise<{ users?: { id: number; username: string; is_admin: boolean }[] }>,
+
   setModelVisibility: (name: string, visibility: 'team' | 'public') => {
     return fetchEndpoint({
       relativeUrl: 'ajax-api/2.0/mlflow/registered-models/set-visibility',

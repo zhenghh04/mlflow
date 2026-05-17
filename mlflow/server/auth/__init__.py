@@ -2831,6 +2831,25 @@ def update_user_profile():
     return jsonify({"user": user.to_json()})
 
 
+@app.route("/ajax-api/2.0/mlflow/users/global-admins", methods=["GET"])
+@catch_mlflow_exception
+def list_global_admins():
+    """Return all users with is_admin=True regardless of active team.
+    System-admin only — used by the GlobalAdmins section in the Admin UI.
+    """
+    if not sender_is_admin():
+        return make_forbidden_response()
+    with store.ManagedSessionMaker() as session:
+        from mlflow.server.auth.db.models import SqlUser
+        admins = session.query(SqlUser).filter(SqlUser.is_admin.is_(True)).all()
+    return jsonify({
+        "users": [
+            {"id": u.id, "username": u.username, "is_admin": True}
+            for u in admins
+        ]
+    })
+
+
 @app.route("/ajax-api/2.0/mlflow/registered-models/list-admin", methods=["GET"])
 @catch_mlflow_exception
 def list_models_admin():

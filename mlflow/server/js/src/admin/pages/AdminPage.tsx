@@ -55,6 +55,7 @@ import {
   useRenameExperiment,
   useRegisteredModelsQuery,
   useSetModelVisibility,
+  useGlobalAdminsQuery,
   useTeamsQuery,
   useCreateTeam,
   useDeleteTeam,
@@ -70,12 +71,16 @@ const TEAM_ROLES = ['member', 'admin'] as const;
  */
 const GlobalAdminsSection = () => {
   const { theme } = useDesignSystemTheme();
-  const { data: usersData, isLoading } = useUsersQuery();
+  const { data: globalAdminsData, isLoading } = useGlobalAdminsQuery();
   const { data: currentUserData } = useCurrentUserQuery();
   const updateAdmin = useUpdateAdmin();
 
   const currentUsername = currentUserData?.user?.username;
-  const users = useMemo(() => usersData?.users ?? [], [usersData]);
+  // System-wide list from /users/global-admins — not limited to the active team
+  const globalAdmins = useMemo(
+    () => globalAdminsData?.users ?? [],
+    [globalAdminsData],
+  );
 
   const toggleAdmin = async (username: string, makeAdmin: boolean) => {
     await updateAdmin.mutateAsync({ username, is_admin: makeAdmin });
@@ -130,31 +135,25 @@ const GlobalAdminsSection = () => {
               <FormattedMessage defaultMessage="Actions" description="Global admins table actions header" />
             </TableHeader>
           </TableRow>
-          {users.map((user) => (
+          {globalAdmins.map((user) => (
             <TableRow key={user.username}>
               <TableCell css={{ flex: 2 }}>
                 <Typography.Text>{user.username}</Typography.Text>
               </TableCell>
               <TableCell css={{ flex: 2 }}>
-                {user.is_admin ? (
-                  <Tag componentId="admin.global_admins.admin_tag" color="indigo">
-                    <FormattedMessage defaultMessage="Global Admin" description="Global admin tag" />
-                  </Tag>
-                ) : (
-                  <Typography.Text color="secondary">
-                    <FormattedMessage defaultMessage="Regular user" description="Regular user label" />
-                  </Typography.Text>
-                )}
+                <Tag componentId="admin.global_admins.admin_tag" color="indigo">
+                  <FormattedMessage defaultMessage="Global Admin" description="Global admin tag" />
+                </Tag>
               </TableCell>
               <TableCell css={{ flex: 1 }}>
                 {user.username !== currentUsername && (
                   <Button
                     componentId="admin.global_admins.toggle_button"
-                    type={user.is_admin ? 'tertiary' : 'primary'}
-                    danger={user.is_admin}
+                    type="tertiary"
+                    danger
                     size="small"
                     loading={updateAdmin.isLoading}
-                    onClick={() => toggleAdmin(user.username, !user.is_admin)}
+                    onClick={() => toggleAdmin(user.username, false)}
                   >
                     {user.is_admin ? (
                       <FormattedMessage defaultMessage="Revoke" description="Revoke global admin button" />

@@ -559,3 +559,14 @@ export const useUpdateTeam = () => {
     },
   });
 };
+
+// ---- Global admins (system-wide, not team-scoped) ----
+
+export const useGlobalAdminsQuery = () => {
+  return useQuery({
+    queryKey: ['admin_global_admins'],
+    queryFn: AdminApi.listGlobalAdmins,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
