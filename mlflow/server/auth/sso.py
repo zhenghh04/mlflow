@@ -96,8 +96,11 @@ class SSOProvider:
     redirect_uri: str
     group_team_map: dict = field(default_factory=dict)
     # Optional allowlist — if non-empty only these emails may sign in.
-    # Leave empty to allow any authenticated account.
     allowed_emails: frozenset = field(default_factory=frozenset)
+    # Identity map: raw_username → canonical_username.
+    # Merges multiple SSO identities into one MLflow account.
+    # e.g. identity_map = zhenghh=huihuo.zheng,zhenghh04=huihuo.zheng
+    identity_map: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -150,6 +153,15 @@ def load_sso_config(config_path: str) -> SSOConfig:
             e.strip().lower() for e in raw_emails.split(",") if e.strip()
         )
 
+        # identity_map: "raw=canonical,raw2=canonical2" pairs
+        raw_imap = cp.get(section, "identity_map", fallback="")
+        identity_map: dict[str, str] = {}
+        for pair in raw_imap.split(","):
+            pair = pair.strip()
+            if "=" in pair:
+                src, dst = pair.split("=", 1)
+                identity_map[src.strip().lower()] = dst.strip().lower()
+
         providers[pid] = SSOProvider(
             id=pid,
             provider_type=ptype,
@@ -167,6 +179,7 @@ def load_sso_config(config_path: str) -> SSOConfig:
             redirect_uri=f"{server_url}/sso/callback/{pid}",
             group_team_map=group_map,
             allowed_emails=allowed,
+            identity_map=identity_map,
         )
         _logger.debug("Loaded SSO provider %r (type=%s)", pid, ptype)
 
@@ -259,7 +272,13 @@ def extract_username(user_info: dict, provider: SSOProvider) -> str:
     if "@" in username and claim in ("email", "preferred_username"):
         username = username.split("@")[0]
 
-    return username.lower()
+    username = username.lower()
+
+    # Apply identity map: remap known aliases to the canonical account
+    if provider.identity_map:
+        username = provider.identity_map.get(username, username)
+
+    return username
 
 
 def extract_groups(user_info: dict) -> list[str]:
