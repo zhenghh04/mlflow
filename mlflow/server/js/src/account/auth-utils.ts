@@ -2,8 +2,19 @@ import { btoaUtf8 as _btoaUtf8 } from '../common/utils/StringUtils';
 export { btoaUtf8 } from '../common/utils/StringUtils';
 export const AUTH_HEADER_COOKIE = 'mlflow-request-header-Authorization';
 export const MLFLOW_USER_COOKIE = 'mlflow_user';
+// SSO session cookie — set by the server after a successful OAuth2 callback
+export const SSO_TOKEN_COOKIE = 'mlflow_sso_token';
+// Team context cookie — cleared on logout so the switcher resets
+export const TEAM_HEADER_COOKIE = 'mlflow-request-header-X-MLflow-Tenant';
+export const ACTIVE_TEAM_COOKIE = 'mlflow_active_team';
 
-const AUTH_COOKIE_NAMES = [MLFLOW_USER_COOKIE, AUTH_HEADER_COOKIE];
+const AUTH_COOKIE_NAMES = [
+  MLFLOW_USER_COOKIE,
+  AUTH_HEADER_COOKIE,
+  SSO_TOKEN_COOKIE,
+  TEAM_HEADER_COOKIE,
+  ACTIVE_TEAM_COOKIE,
+];
 
 /**
  * Cookie deletion does an exact path match, so cover root + the app's
@@ -55,22 +66,26 @@ export const performLogout = (queryClient?: { clear: () => void }) => {
   clearAuthCookies();
   queryClient?.clear();
 
-  // Per-load nonce - if the bogus creds collide with real ones, the XHR
-  // would succeed and the browser would keep the cached creds.
+  const loginUrl = new URL('.', window.location.href).toString() + '#/login';
+
+  // For SSO sessions there is no browser-cached Basic Auth realm to clear,
+  // so we can redirect straight to the login page.
+  const hasSSOToken = document.cookie.includes(SSO_TOKEN_COOKIE + '=') === false &&
+    !document.cookie.includes(AUTH_HEADER_COOKIE + '=');
+
+  // Always try the XHR trick to bust the browser's Basic Auth cache — it is a
+  // no-op for SSO sessions but harmless. Redirect to /#/login in both cases.
   const nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
   const bogus = `mlflow-logged-out-${nonce}`;
   const usersCurrentUrl = new URL('ajax-api/2.0/mlflow/users/current', window.location.href).toString();
-  const homeUrl = new URL('.', window.location.href).toString();
 
-  const goHome = () => window.location.assign(homeUrl);
+  const goLogin = () => window.location.assign(loginUrl);
   try {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', usersCurrentUrl, true, bogus, bogus);
-    // Wait for the cache write before navigating - otherwise the home-page
-    // request could fire with stale creds and silently auto-auth.
-    xhr.onloadend = goHome;
+    xhr.onloadend = goLogin;
     xhr.send();
   } catch {
-    goHome();
+    goLogin();
   }
 };
