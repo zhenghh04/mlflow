@@ -58,6 +58,7 @@ import {
   useTeamsQuery,
   useCreateTeam,
   useDeleteTeam,
+  useUpdateTeam,
 } from '../hooks';
 
 const TEAM_ROLES = ['member', 'admin'] as const;
@@ -1084,12 +1085,46 @@ const TeamsTab = () => {
   const createTeam = useCreateTeam();
   const deleteTeam = useDeleteTeam();
 
+  const updateTeam = useUpdateTeam();
+
+  // create state
   const [showCreate, setShowCreate] = useState(false);
   const [newSlug, setNewSlug] = useState('');
   const [newName, setNewName] = useState('');
   const [newStorageRoot, setNewStorageRoot] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // edit state
+  const [editTarget, setEditTarget] = useState<{ slug: string; name: string; storage_root?: string } | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editStorageRoot, setEditStorageRoot] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const openEdit = (team: { slug: string; name: string; storage_root?: string }) => {
+    setEditTarget(team);
+    setEditName(team.name);
+    setEditStorageRoot(team.storage_root ?? '');
+    setEditError(null);
+  };
+
+  const closeEdit = () => { setEditTarget(null); setEditError(null); };
+
+  const handleEdit = async () => {
+    if (!editTarget) return;
+    setEditError(null);
+    if (!editName.trim()) { setEditError('Name is required'); return; }
+    try {
+      await updateTeam.mutateAsync({
+        slug: editTarget.slug,
+        name: editName.trim(),
+        storage_root: editStorageRoot.trim() || undefined,
+      });
+      closeEdit();
+    } catch (e: unknown) {
+      setEditError(e instanceof Error ? e.message : 'Failed to update team');
+    }
+  };
 
   const teams = useMemo(() => data?.tenants ?? [], [data]);
 
@@ -1219,23 +1254,28 @@ const TeamsTab = () => {
               </Typography.Text>
             </TableCell>
             <TableCell css={{ flex: 1 }}>
-              {team.slug !== 'default' && (
+              <div css={{ display: 'flex', gap: theme.spacing.xs }}>
                 <Button
-                  componentId="admin.teams.delete_button"
+                  componentId="admin.teams.edit_button"
                   type="tertiary"
-                  danger
                   size="small"
-                  loading={deleteTeam.isLoading}
-                  onClick={() => handleDelete(team.slug)}
+                  onClick={() => openEdit(team)}
                 >
-                  <FormattedMessage defaultMessage="Delete" description="Delete team button" />
+                  <FormattedMessage defaultMessage="Edit" description="Edit team button" />
                 </Button>
-              )}
-              {team.slug === 'default' && (
-                <Typography.Text color="secondary">
-                  <FormattedMessage defaultMessage="System" description="System team label" />
-                </Typography.Text>
-              )}
+                {team.slug !== 'default' && (
+                  <Button
+                    componentId="admin.teams.delete_button"
+                    type="tertiary"
+                    danger
+                    size="small"
+                    loading={deleteTeam.isLoading}
+                    onClick={() => handleDelete(team.slug)}
+                  >
+                    <FormattedMessage defaultMessage="Delete" description="Delete team button" />
+                  </Button>
+                )}
+              </div>
             </TableCell>
           </TableRow>
         ))}
@@ -1293,6 +1333,64 @@ const TeamsTab = () => {
           </div>
         </div>
       </Modal>
+
+      {/* Edit team modal */}
+      {editTarget && (
+        <Modal
+          componentId="admin.teams.edit_modal"
+          title={`Edit team — ${editTarget.slug}`}
+          visible
+          onCancel={closeEdit}
+          onOk={handleEdit}
+          okText="Save"
+          confirmLoading={updateTeam.isLoading}
+        >
+          <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+            {editError && (
+              <Alert
+                componentId="admin.teams.edit_error"
+                type="error"
+                message={editError}
+                closable
+                onClose={() => setEditError(null)}
+              />
+            )}
+            <div>
+              <Typography.Text bold>Team name</Typography.Text>
+              <Input
+                componentId="admin.teams.edit_name_input"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleEdit()}
+                autoFocus
+              />
+            </div>
+            <div>
+              <Typography.Text bold>
+                Slug <Typography.Text color="secondary">(read-only)</Typography.Text>
+              </Typography.Text>
+              <Input
+                componentId="admin.teams.edit_slug_input"
+                value={editTarget.slug}
+                disabled
+              />
+            </div>
+            <div>
+              <Typography.Text bold>
+                Artifact storage root{' '}
+                <Typography.Text color="secondary">(optional)</Typography.Text>
+              </Typography.Text>
+              <Typography.Hint>Base path for experiment artifacts</Typography.Hint>
+              <Input
+                componentId="admin.teams.edit_storage_input"
+                value={editStorageRoot}
+                onChange={(e) => setEditStorageRoot(e.target.value)}
+                placeholder="e.g. /eagle/datascience/mlflow"
+              />
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 };
