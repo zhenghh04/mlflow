@@ -66,12 +66,8 @@ export const performLogout = (queryClient?: { clear: () => void }) => {
   clearAuthCookies();
   queryClient?.clear();
 
-  const loginUrl = "/oauth2/sign_out?rd=https%3A%2F%2Fauth.globus.org%2Fv2%2Fweb%2Flogout";  // Globus SSO logout
-
-  // For SSO sessions there is no browser-cached Basic Auth realm to clear,
-  // so we can redirect straight to the login page.
-  const hasSSOToken = document.cookie.includes(SSO_TOKEN_COOKIE + '=') === false &&
-    !document.cookie.includes(AUTH_HEADER_COOKIE + '=');
+  // Redirect to our login page after clearing cookies
+  const loginUrl = new URL('.', window.location.href).toString() + '#/login';
 
   // Always try the XHR trick to bust the browser's Basic Auth cache — it is a
   // no-op for SSO sessions but harmless. Redirect to /#/login in both cases.
