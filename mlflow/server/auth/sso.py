@@ -95,6 +95,9 @@ class SSOProvider:
     userinfo_url: str
     redirect_uri: str
     group_team_map: dict = field(default_factory=dict)
+    # Optional allowlist — if non-empty only these emails may sign in.
+    # Leave empty to allow any authenticated account.
+    allowed_emails: frozenset = field(default_factory=frozenset)
 
 
 @dataclass
@@ -138,6 +141,15 @@ def load_sso_config(config_path: str) -> SSOConfig:
                 g, t = pair.split("=", 1)
                 group_map[g.strip()] = t.strip()
 
+        # allowed_emails: comma-separated list; empty = allow any account.
+        # Multiple identities (different email domains, same local part) map to
+        # the same MLflow username automatically via extract_username() which
+        # strips the @domain. Add all email variants here to allow them.
+        raw_emails = cp.get(section, "allowed_emails", fallback="")
+        allowed = frozenset(
+            e.strip().lower() for e in raw_emails.split(",") if e.strip()
+        )
+
         providers[pid] = SSOProvider(
             id=pid,
             provider_type=ptype,
@@ -154,6 +166,7 @@ def load_sso_config(config_path: str) -> SSOConfig:
             userinfo_url=cp.get(section, "userinfo_url", fallback=defaults.get("userinfo_url", "")),
             redirect_uri=f"{server_url}/sso/callback/{pid}",
             group_team_map=group_map,
+            allowed_emails=allowed,
         )
         _logger.debug("Loaded SSO provider %r (type=%s)", pid, ptype)
 
@@ -211,8 +224,25 @@ def get_user_info(provider: SSOProvider, token: dict) -> dict:
 
 
 def extract_username(user_info: dict, provider: SSOProvider) -> str:
-    """Derive a short, URL-safe username from provider identity claims."""
+    """Derive a short, URL-safe username from provider identity claims.
+
+    Multiple email identities (e.g. user@anl.gov, user@americansciencecloud.org,
+    user@gmail.com) all map to the same MLflow username ``user`` because the
+    @domain part is stripped.  Add all allowed email variants to the
+    ``allowed_emails`` list in basic_auth.ini to control who may sign in.
+    """
     claim = provider.username_claim
+    email_from_info = str(user_info.get("email", "")).strip().lower()
+
+    # Allowlist check — runs before username derivation so blocked users see
+    # a clear error rather than a 500.
+    if provider.allowed_emails and email_from_info:
+        if email_from_info not in provider.allowed_emails:
+            raise ValueError(
+                f"The email {email_from_info!r} is not authorised to access this "
+                "MLflow instance. Contact your administrator to be added."
+            )
+
     username = str(user_info.get(claim, "")).strip()
 
     # Fallback chain
@@ -225,7 +255,7 @@ def extract_username(user_info: dict, provider: SSOProvider) -> str:
     if not username:
         raise ValueError("Could not extract a username from the SSO identity claims")
 
-    # Strip @domain for email-style claims
+    # Strip @domain so multiple email domains (same local part) share one account
     if "@" in username and claim in ("email", "preferred_username"):
         username = username.split("@")[0]
 
