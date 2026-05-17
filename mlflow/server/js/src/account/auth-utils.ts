@@ -63,25 +63,13 @@ export const applyCredentials = (username: string, password: string) => {
 };
 
 export const performLogout = (queryClient?: { clear: () => void }) => {
+  // 1. Clear all client-side auth cookies immediately
   clearAuthCookies();
   queryClient?.clear();
 
-  // Redirect to our login page after clearing cookies
-  const loginUrl = new URL('.', window.location.href).toString() + '#/login';
-
-  // Always try the XHR trick to bust the browser's Basic Auth cache — it is a
-  // no-op for SSO sessions but harmless. Redirect to /#/login in both cases.
-  const nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
-  const bogus = `mlflow-logged-out-${nonce}`;
-  const usersCurrentUrl = new URL('ajax-api/2.0/mlflow/users/current', window.location.href).toString();
-
-  const goLogin = () => window.location.assign(loginUrl);
-  try {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', usersCurrentUrl, true, bogus, bogus);
-    xhr.onloadend = goLogin;
-    xhr.send();
-  } catch {
-    goLogin();
-  }
+  // 2. Navigate to the server-side logout endpoint.
+  //    The server sets Set-Cookie: mlflow_sso_token=; Max-Age=0 (server-side
+  //    clearing is more reliable than JS for Secure/HttpOnly cookies) and then
+  //    redirects to /#/login.
+  window.location.assign('/sso/logout');
 };

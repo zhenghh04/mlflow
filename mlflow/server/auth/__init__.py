@@ -2785,11 +2785,21 @@ def sso_verify():
 
 @app.route("/sso/logout", methods=["POST", "GET"])
 def sso_logout():
-    """Clear the SSO session token cookie and redirect to login."""
+    """Clear all auth cookies server-side and redirect to the login page."""
     resp = make_response()
     resp.status_code = 302
     resp.headers["Location"] = "/#/login"
-    resp.set_cookie(SSO_TOKEN_COOKIE, "", max_age=0)
+    # Clear every auth cookie the server knows about — server-side Set-Cookie
+    # is reliable regardless of Secure/SameSite attributes.
+    _all_auth_cookies = [
+        SSO_TOKEN_COOKIE,
+        "mlflow-request-header-Authorization",
+        "mlflow_user",
+        "mlflow-request-header-X-MLflow-Tenant",
+        "mlflow_active_team",
+    ]
+    for name in _all_auth_cookies:
+        resp.set_cookie(name, "", max_age=0, path="/")
     return resp
 
 
