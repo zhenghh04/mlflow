@@ -271,18 +271,23 @@ def extract_groups(user_info: dict) -> list[str]:
 
 def issue_session_token(username: str, secret_key: str) -> str:
     payload = json.dumps({"sub": username, "iat": int(time.time())}, separators=(",", ":"))
-    b64 = urllib.parse.quote_plus(payload)
+    # Use quote(safe='') so ALL characters including '.' are percent-encoded —
+    # this prevents usernames like 'huihuo.zheng' from inserting unencoded dots
+    # that would confuse the '.' separator between b64 and sig.
+    b64 = urllib.parse.quote(payload, safe="")
     sig = hmac.new(secret_key.encode(), b64.encode(), hashlib.sha256).hexdigest()
     return f"{b64}.{sig}"
 
 
 def verify_session_token(token: str, secret_key: str) -> Optional[str]:
     try:
-        b64, sig = token.split(".", 1)
+        # rsplit from the right: the HMAC sig (64 hex chars) has no dots;
+        # the b64 payload may have dots if an older token used quote_plus.
+        b64, sig = token.rsplit(".", 1)
         expected = hmac.new(secret_key.encode(), b64.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
-        payload = json.loads(urllib.parse.unquote_plus(b64))
+        payload = json.loads(urllib.parse.unquote(b64))
         if int(time.time()) - payload.get("iat", 0) > _SESSION_TOKEN_TTL:
             return None
         return payload.get("sub")
