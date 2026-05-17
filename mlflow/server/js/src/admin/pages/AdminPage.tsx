@@ -168,11 +168,22 @@ const GlobalAdminsSection = () => {
   );
 };
 
+/** Read the active team slug from the header-forwarding cookie. */
+const getActiveCookieTeam = (): string => {
+  const raw = document.cookie
+    .split('; ')
+    .find((r) => r.startsWith('mlflow_active_team='))
+    ?.substring('mlflow_active_team='.length) ?? '';
+  try { return decodeURIComponent(raw) || 'default'; } catch { return raw || 'default'; }
+};
+
 const TeamMembersSection = () => {
   const { theme } = useDesignSystemTheme();
   const { data, isLoading } = useTeamMembersQuery();
   const addMember = useAddTeamMember();
   const removeMember = useRemoveTeamMember();
+  const isGlobalAdmin = useCurrentUserIsAdmin();
+  const activeTeam = getActiveCookieTeam();
 
   const [newUsername, setNewUsername] = useState('');
   const [newRole, setNewRole] = useState<string>('member');
@@ -204,9 +215,22 @@ const TeamMembersSection = () => {
 
   return (
     <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
-      <Typography.Title level={4}>
-        <FormattedMessage defaultMessage="Team Members" description="Team members section title in admin users tab" />
-      </Typography.Title>
+      <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+        <Typography.Title level={4} withoutMargins>
+          <FormattedMessage defaultMessage="Team Members" description="Team members section title in admin users tab" />
+        </Typography.Title>
+        <Tag componentId="admin.team_members.active_team_tag" color="default">
+          {activeTeam}
+        </Tag>
+        {isGlobalAdmin && activeTeam === 'default' && (
+          <Typography.Hint>
+            <FormattedMessage
+              defaultMessage="Switch team in the sidebar to manage other teams"
+              description="Hint shown to global admin when on default team"
+            />
+          </Typography.Hint>
+        )}
+      </div>
       {addError && (
         <Alert
           componentId="admin.team_members.add_error"

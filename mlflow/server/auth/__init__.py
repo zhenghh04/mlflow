@@ -2490,6 +2490,42 @@ def delete_can_manage_registered_model_permission(resp: Response):
 
 # ---- Model visibility handler ----
 
+@app.route("/ajax-api/2.0/mlflow/users/profile", methods=["GET"])
+@catch_mlflow_exception
+def get_user_profile():
+    """Return full profile (fields + teams) for the authenticated user."""
+    username = authenticate_request().username
+    profile = store.get_user_profile(username)
+    return jsonify({"profile": profile})
+
+
+@app.route("/ajax-api/2.0/mlflow/users/update-profile", methods=["PATCH"])
+@catch_mlflow_exception
+def update_user_profile():
+    """Update profile fields for the authenticated user.
+
+    Accepts a JSON body with any subset of:
+    display_name, email, title, department, location, bio,
+    github, orcid, avatar_url (base64 data URL).
+    """
+    username = authenticate_request().username
+    body = request.get_json(silent=True) or {}
+    user = store.update_profile(
+        username=username,
+        display_name=body.get("display_name"),
+        email=body.get("email"),
+        title=body.get("title"),
+        department=body.get("department"),
+        location=body.get("location"),
+        bio=body.get("bio"),
+        github=body.get("github"),
+        orcid=body.get("orcid"),
+        avatar_url=body.get("avatar_url"),
+    )
+    _invalidate_user_auth_cache(username)
+    return jsonify({"user": user.to_json()})
+
+
 @app.route("/ajax-api/2.0/mlflow/registered-models/list-admin", methods=["GET"])
 @catch_mlflow_exception
 def list_models_admin():
@@ -3414,8 +3450,6 @@ def get_current_user():
     username = authenticate_request().username
     user = store.get_user(username)
     is_basic_auth = auth_config.authorization_function == DEFAULT_AUTHORIZATION_FUNCTION
-    # Include team_role so the frontend can gate team-admin affordances (e.g.
-    # the Manage link in the sidebar) without a separate request.
     team_role = store.get_team_role(username)
     return jsonify({
         "user": {
@@ -3424,6 +3458,9 @@ def get_current_user():
             "is_admin": user.is_admin or team_role == "admin",
             "is_global_admin": user.is_admin,
             "team_role": team_role,
+            # Profile fields inline so the sidebar/header can show display_name/avatar
+            "display_name": user.display_name,
+            "avatar_url": user.avatar_url,
         },
         "is_basic_auth": is_basic_auth,
     })

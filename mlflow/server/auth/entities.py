@@ -127,6 +127,10 @@ class Tenant:
         )
 
 
+_PROFILE_FIELDS = ("display_name", "email", "title", "department",
+                   "location", "bio", "github", "orcid", "avatar_url")
+
+
 class User:
     def __init__(
         self,
@@ -134,11 +138,29 @@ class User:
         username,
         password_hash,
         is_admin,
+        display_name=None,
+        email=None,
+        title=None,
+        department=None,
+        location=None,
+        bio=None,
+        github=None,
+        orcid=None,
+        avatar_url=None,
     ):
         self._id = id_
         self._username = username
         self._password_hash = password_hash
         self._is_admin = is_admin
+        self._display_name = display_name
+        self._email = email
+        self._title = title
+        self._department = department
+        self._location = location
+        self._bio = bio
+        self._github = github
+        self._orcid = orcid
+        self._avatar_url = avatar_url
 
     @property
     def id(self):
@@ -160,11 +182,39 @@ class User:
     def is_admin(self, is_admin):
         self._is_admin = is_admin
 
+    @property
+    def display_name(self): return self._display_name
+    @property
+    def email(self): return self._email
+    @property
+    def title(self): return self._title
+    @property
+    def department(self): return self._department
+    @property
+    def location(self): return self._location
+    @property
+    def bio(self): return self._bio
+    @property
+    def github(self): return self._github
+    @property
+    def orcid(self): return self._orcid
+    @property
+    def avatar_url(self): return self._avatar_url
+
     def to_json(self):
         return {
             "id": self.id,
             "username": self.username,
             "is_admin": self.is_admin,
+            "display_name": self.display_name,
+            "email": self.email,
+            "title": self.title,
+            "department": self.department,
+            "location": self.location,
+            "bio": self.bio,
+            "github": self.github,
+            "orcid": self.orcid,
+            "avatar_url": self.avatar_url,
         }
 
     @classmethod

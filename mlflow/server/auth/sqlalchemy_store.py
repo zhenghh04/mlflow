@@ -474,6 +474,51 @@ class SqlAlchemyStore:
                 for u in users
             ]
 
+    def update_profile(
+        self,
+        username: str,
+        display_name: str | None = None,
+        email: str | None = None,
+        title: str | None = None,
+        department: str | None = None,
+        location: str | None = None,
+        bio: str | None = None,
+        github: str | None = None,
+        orcid: str | None = None,
+        avatar_url: str | None = None,
+    ) -> User:
+        _PROFILE = ("display_name", "email", "title", "department",
+                    "location", "bio", "github", "orcid", "avatar_url")
+        kwargs = {k: v for k, v in {
+            "display_name": display_name, "email": email, "title": title,
+            "department": department, "location": location, "bio": bio,
+            "github": github, "orcid": orcid, "avatar_url": avatar_url,
+        }.items() if v is not None}
+        with self.ManagedSessionMaker(read_only=False) as session:
+            user = self._get_user(session, username)
+            for field, value in kwargs.items():
+                if field in _PROFILE:
+                    setattr(user, field, value)
+            session.flush()
+            return user.to_mlflow_entity()
+
+    def get_user_profile(self, username: str) -> dict:
+        """Return user info + teams with roles for the profile page."""
+        with self.ManagedSessionMaker() as session:
+            sql_user = self._get_user(session, username)
+            profile = sql_user.to_mlflow_entity().to_json()
+            teams = (
+                session.query(SqlTenant, SqlTeamMembership.role)
+                .join(SqlTeamMembership, SqlTenant.id == SqlTeamMembership.tenant_id)
+                .filter(SqlTeamMembership.user_id == sql_user.id)
+                .all()
+            )
+            profile["teams"] = [
+                {"slug": t.slug, "name": t.name, "role": role}
+                for t, role in teams
+            ]
+            return profile
+
     def update_user(
         self, username: str, password: str | None = None, is_admin: bool | None = None
     ) -> User:

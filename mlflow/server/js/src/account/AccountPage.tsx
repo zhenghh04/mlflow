@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Avatar,
@@ -19,7 +19,7 @@ import {
 } from '@databricks/design-system';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { ScrollablePageWrapper } from '@mlflow/mlflow/src/common/components/ScrollablePageWrapper';
-import { useQueryClient } from '@mlflow/mlflow/src/common/utils/reactQueryHooks';
+import { useMutation, useQuery, useQueryClient } from '@mlflow/mlflow/src/common/utils/reactQueryHooks';
 import { useWorkspacesEnabled } from '../experiment-tracking/hooks/useServerInfo';
 import { useSearchParams } from '../common/utils/RoutingUtils';
 import { performLogout } from './auth-utils';
@@ -33,11 +33,34 @@ import {
 import { PermissionsSection } from './PermissionsSection';
 import { DEFAULT_WORKSPACE_NAME, isWorkspaceAdminRole } from './types';
 import type { Role } from './types';
+import { AccountApi } from './api';
 
-/**
- * Reads the active tenant slug from the ``mlflow_tenant`` cookie set by
- * the multi-tenant middleware, falling back to "default".
- */
+// ─── types ───────────────────────────────────────────────────────────────────
+
+interface TeamEntry {
+  slug: string;
+  name: string;
+  role: string;
+}
+
+interface ProfileData {
+  id: number;
+  username: string;
+  is_admin: boolean;
+  display_name?: string;
+  email?: string;
+  title?: string;
+  department?: string;
+  location?: string;
+  bio?: string;
+  github?: string;
+  orcid?: string;
+  avatar_url?: string;
+  teams?: TeamEntry[];
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
 const getActiveTenantSlug = (): string => {
   const raw =
     document.cookie
@@ -51,6 +74,45 @@ const getActiveTenantSlug = (): string => {
   }
 };
 
+/** Resize a File to a 128×128 data-URL via an offscreen canvas. */
+const resizeAvatar = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.onload = (ev) => {
+      const src = ev.target?.result as string;
+      const img = new Image();
+      img.onerror = () => reject(new Error('Failed to decode image'));
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 128;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Canvas not available'));
+          return;
+        }
+        // Centre-crop to square then scale
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2;
+        const sy = (img.height - side) / 2;
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, 128, 128);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
+  });
+
+/** Pick a deterministic background colour from an initial letter. */
+const initialsColor = (initial: string): string => {
+  const palette = ['#4c84d6', '#7b61d6', '#d66b4c', '#4cad7b', '#d6b84c', '#d64c7b'];
+  const idx = (initial.toUpperCase().charCodeAt(0) - 65) % palette.length;
+  return palette[Math.max(0, idx)];
+};
+
+// ─── sub-components ──────────────────────────────────────────────────────────
+
 const TenantBadge = () => {
   const slug = getActiveTenantSlug();
   return (
@@ -60,11 +122,6 @@ const TenantBadge = () => {
   );
 };
 
-/**
- * One row of the Roles tab on the Account page. Renders the role name,
- * its workspace (when ``workspacesEnabled``), and a "Manager" / "Admin"
- * tag for workspace-admin roles.
- */
 const AccountRoleRow = ({ role, workspacesEnabled }: { role: Role; workspacesEnabled: boolean }) => (
   <TableRow>
     <TableCell css={{ flex: 2 }}>{role.name}</TableCell>
@@ -73,18 +130,373 @@ const AccountRoleRow = ({ role, workspacesEnabled }: { role: Role; workspacesEna
       {isWorkspaceAdminRole(role) ? (
         <Tag componentId="account.role_admin_tag" color="indigo">
           {workspacesEnabled ? (
-            <FormattedMessage
-              defaultMessage="Manager"
-              description="Tag content marking a workspace-admin role (multi-tenant)"
-            />
+            <FormattedMessage defaultMessage="Manager" description="Workspace-admin role tag (multi-tenant)" />
           ) : (
-            <FormattedMessage defaultMessage="Admin" description="Tag content marking an admin role (single-tenant)" />
+            <FormattedMessage defaultMessage="Admin" description="Admin role tag (single-tenant)" />
           )}
         </Tag>
       ) : null}
     </TableCell>
   </TableRow>
 );
+
+// ─── ProfileAvatar ────────────────────────────────────────────────────────────
+
+interface ProfileAvatarProps {
+  profile: ProfileData | undefined;
+  onAvatarUploaded: (dataUrl: string) => void;
+  isUploading: boolean;
+}
+
+const ProfileAvatar = ({ profile, onAvatarUploaded, isUploading }: ProfileAvatarProps) => {
+  const { theme } = useDesignSystemTheme();
+  const intl = useIntl();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const initial = (profile?.display_name ?? profile?.username ?? '?')[0].toUpperCase();
+  const bgColor = initialsColor(initial);
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLocalError(null);
+    try {
+      const dataUrl = await resizeAvatar(file);
+      onAvatarUploaded(dataUrl);
+    } catch (err) {
+      setLocalError(
+        intl.formatMessage({
+          defaultMessage: 'Failed to process image',
+          description: 'Error shown when avatar image processing fails',
+        }),
+      );
+    }
+    // reset so the same file can be re-selected
+    e.target.value = '';
+  };
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: theme.spacing.xs }}>
+      {profile?.avatar_url ? (
+        <img
+          src={profile.avatar_url}
+          alt={intl.formatMessage({ defaultMessage: 'Avatar', description: 'Alt text for profile avatar image' })}
+          css={{
+            width: 96,
+            height: 96,
+            borderRadius: '50%',
+            objectFit: 'cover',
+            border: `2px solid ${theme.colors.border}`,
+          }}
+        />
+      ) : (
+        <div
+          css={{
+            width: 96,
+            height: 96,
+            borderRadius: '50%',
+            backgroundColor: bgColor,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Typography.Title level={2} withoutMargins css={{ color: '#fff', lineHeight: 1 }}>
+            {initial}
+          </Typography.Title>
+        </div>
+      )}
+
+      {isUploading ? (
+        <Spinner size="small" />
+      ) : (
+        <Button
+          componentId="account.avatar_upload_button"
+          type="tertiary"
+          size="small"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <FormattedMessage defaultMessage="Upload photo" description="Button to upload a profile photo" />
+        </Button>
+      )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        aria-label={intl.formatMessage({
+          defaultMessage: 'Upload profile photo',
+          description: 'Accessible label for the hidden file input used to upload an avatar',
+        })}
+        css={{ display: 'none' }}
+        onChange={handleFile}
+      />
+
+      {localError && (
+        <Alert
+          componentId="account.avatar_error"
+          type="error"
+          message={localError}
+          closable
+          onClose={() => setLocalError(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+// ─── EditProfileModal ─────────────────────────────────────────────────────────
+
+interface EditProfileModalProps {
+  profile: ProfileData;
+  visible: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+const EditProfileModal = ({ profile, visible, onClose, onSaved }: EditProfileModalProps) => {
+  const { theme } = useDesignSystemTheme();
+  const intl = useIntl();
+  const queryClient = useQueryClient();
+
+  const [displayName, setDisplayName] = useState(profile.display_name ?? '');
+  const [email, setEmail] = useState(profile.email ?? '');
+  const [title, setTitle] = useState(profile.title ?? '');
+  const [department, setDepartment] = useState(profile.department ?? '');
+  const [location, setLocation] = useState(profile.location ?? '');
+  const [github, setGithub] = useState(profile.github ?? '');
+  const [orcid, setOrcid] = useState(profile.orcid ?? '');
+  const [bio, setBio] = useState(profile.bio ?? '');
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const updateMutation = useMutation({
+    mutationFn: AccountApi.updateProfile,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['account_current_user'] });
+      queryClient.invalidateQueries({ queryKey: ['account_profile'] });
+      setSaveError(null);
+      onSaved();
+      onClose();
+    },
+    onError: (err: unknown) => {
+      setSaveError(
+        err instanceof Error
+          ? err.message
+          : intl.formatMessage({
+              defaultMessage: 'Failed to save profile',
+              description: 'Generic error when profile save fails',
+            }),
+      );
+    },
+  });
+
+  const handleSave = () => {
+    const fields: Parameters<typeof AccountApi.updateProfile>[0] = {};
+    if (displayName !== (profile.display_name ?? '')) fields.display_name = displayName;
+    if (email !== (profile.email ?? '')) fields.email = email;
+    if (title !== (profile.title ?? '')) fields.title = title;
+    if (department !== (profile.department ?? '')) fields.department = department;
+    if (location !== (profile.location ?? '')) fields.location = location;
+    if (github !== (profile.github ?? '')) fields.github = github;
+    if (orcid !== (profile.orcid ?? '')) fields.orcid = orcid;
+    if (bio !== (profile.bio ?? '')) fields.bio = bio;
+    updateMutation.mutate(fields);
+  };
+
+  const field = (
+    label: React.ReactNode,
+    value: string,
+    onChange: (v: string) => void,
+    componentId: string,
+    placeholder?: string,
+  ) => (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+      <Typography.Text bold>{label}</Typography.Text>
+      <Input
+        componentId={componentId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+      />
+    </div>
+  );
+
+  return (
+    <Modal
+      componentId="account.edit_profile_modal"
+      title={intl.formatMessage({ defaultMessage: 'Edit Profile', description: 'Edit profile modal title' })}
+      visible={visible}
+      onCancel={onClose}
+      onOk={handleSave}
+      okText={intl.formatMessage({ defaultMessage: 'Save', description: 'Save button in edit profile modal' })}
+      confirmLoading={updateMutation.isLoading}
+    >
+      <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+        {saveError && (
+          <Alert
+            componentId="account.edit_profile_modal.error"
+            type="error"
+            message={saveError}
+            closable
+            onClose={() => setSaveError(null)}
+          />
+        )}
+
+        <div
+          css={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: theme.spacing.md,
+          }}
+        >
+          {field(
+            <FormattedMessage defaultMessage="Display Name" description="Display name field label" />,
+            displayName,
+            setDisplayName,
+            'account.edit_profile.display_name',
+            intl.formatMessage({ defaultMessage: 'Your name', description: 'Display name placeholder' }),
+          )}
+          {field(
+            <FormattedMessage defaultMessage="Email" description="Email field label" />,
+            email,
+            setEmail,
+            'account.edit_profile.email',
+            intl.formatMessage({ defaultMessage: 'you@example.com', description: 'Email placeholder' }),
+          )}
+          {field(
+            <FormattedMessage defaultMessage="Title" description="Title field label" />,
+            title,
+            setTitle,
+            'account.edit_profile.title',
+            intl.formatMessage({ defaultMessage: 'e.g. Senior Researcher', description: 'Title placeholder' }),
+          )}
+          {field(
+            <FormattedMessage defaultMessage="Department" description="Department field label" />,
+            department,
+            setDepartment,
+            'account.edit_profile.department',
+            intl.formatMessage({ defaultMessage: 'e.g. Engineering', description: 'Department placeholder' }),
+          )}
+          {field(
+            <FormattedMessage defaultMessage="Location" description="Location field label" />,
+            location,
+            setLocation,
+            'account.edit_profile.location',
+            intl.formatMessage({ defaultMessage: 'e.g. Chicago, IL', description: 'Location placeholder' }),
+          )}
+          {field(
+            <FormattedMessage defaultMessage="GitHub" description="GitHub field label" />,
+            github,
+            setGithub,
+            'account.edit_profile.github',
+            intl.formatMessage({ defaultMessage: 'github username', description: 'GitHub placeholder' }),
+          )}
+          {field(
+            <FormattedMessage defaultMessage="ORCID" description="ORCID field label" />,
+            orcid,
+            setOrcid,
+            'account.edit_profile.orcid',
+            intl.formatMessage({
+              defaultMessage: '0000-0000-0000-0000',
+              description: 'ORCID placeholder',
+            }),
+          )}
+        </div>
+
+        <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+          <Typography.Text bold>
+            <FormattedMessage defaultMessage="Bio" description="Bio field label" />
+          </Typography.Text>
+          <Input
+            componentId="account.edit_profile.bio"
+            value={bio}
+            onChange={(e) => setBio(e.target.value)}
+            placeholder={intl.formatMessage({
+              defaultMessage: 'Short bio…',
+              description: 'Bio input placeholder',
+            })}
+          />
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// ─── TeamsTable ───────────────────────────────────────────────────────────────
+
+const TeamsTable = ({ teams }: { teams: TeamEntry[] }) => {
+  const { theme } = useDesignSystemTheme();
+  const intl = useIntl();
+
+  if (teams.length === 0) {
+    return (
+      <Empty
+        title={intl.formatMessage({
+          defaultMessage: 'No teams',
+          description: 'Empty state title for teams table',
+        })}
+        description={intl.formatMessage({
+          defaultMessage: 'You are not a member of any teams.',
+          description: 'Empty state description for teams table',
+        })}
+      />
+    );
+  }
+
+  return (
+    <Table
+      scrollable
+      noMinHeight
+      css={{
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.general.borderRadiusBase,
+        overflow: 'hidden',
+      }}
+    >
+      <TableRow isHeader>
+        <TableHeader componentId="account.teams.name_header" css={{ flex: 2 }}>
+          <FormattedMessage defaultMessage="Team" description="Teams table column header: team name" />
+        </TableHeader>
+        <TableHeader componentId="account.teams.slug_header" css={{ flex: 1 }}>
+          <FormattedMessage defaultMessage="Slug" description="Teams table column header: team slug" />
+        </TableHeader>
+        <TableHeader componentId="account.teams.role_header" css={{ flex: 1 }}>
+          <FormattedMessage defaultMessage="Role" description="Teams table column header: team role" />
+        </TableHeader>
+      </TableRow>
+      {teams.map((t) => (
+        <TableRow key={t.slug}>
+          <TableCell css={{ flex: 2 }}>{t.name}</TableCell>
+          <TableCell css={{ flex: 1 }}>
+            <code>{t.slug}</code>
+          </TableCell>
+          <TableCell css={{ flex: 1 }}>
+            <Tag componentId="account.teams.role_tag" color={t.role === 'admin' ? 'indigo' : 'default'}>
+              {t.role}
+            </Tag>
+          </TableCell>
+        </TableRow>
+      ))}
+    </Table>
+  );
+};
+
+// ─── InfoGrid ────────────────────────────────────────────────────────────────
+
+const InfoRow = ({ label, value }: { label: React.ReactNode; value?: string }) => {
+  const { theme } = useDesignSystemTheme();
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs / 2 }}>
+      <Typography.Text size="sm" color="secondary">
+        {label}
+      </Typography.Text>
+      <Typography.Text>{value || '—'}</Typography.Text>
+    </div>
+  );
+};
+
+// ─── AccountPage ──────────────────────────────────────────────────────────────
 
 const AccountPage = () => {
   const { theme } = useDesignSystemTheme();
@@ -93,38 +505,51 @@ const AccountPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
   const activeTab = tabFromUrl === 'permissions' ? 'permissions' : 'roles';
+
+  // ── existing account state ────────────────────────────────────────────────
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const [editProfileOpen, setEditProfileOpen] = useState(false);
 
   const updatePassword = useUpdatePassword();
   const { data: currentUserData, isLoading: currentUserLoading } = useCurrentUserQuery();
   const username = currentUserData?.user?.username ?? '';
   const { workspacesEnabled } = useWorkspacesEnabled();
-  // Change-password drives the same Basic-Auth realm-cache flow as logout,
-  // so hide the affordance under custom authorization_function plugins.
   const isBasicAuth = useIsBasicAuth();
 
-  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  // ── profile query ─────────────────────────────────────────────────────────
+  const {
+    data: profileData,
+    isLoading: profileLoading,
+    error: profileError,
+  } = useQuery({
+    queryKey: ['account_profile'],
+    queryFn: AccountApi.getProfile,
+    retry: false,
+    refetchOnWindowFocus: false,
+    enabled: Boolean(username),
+  });
+  const profile = profileData?.profile;
 
-  const closeChangePassword = () => {
-    setChangePasswordOpen(false);
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    setError(null);
-  };
+  // ── avatar upload mutation ────────────────────────────────────────────────
+  const avatarMutation = useMutation({
+    mutationFn: (dataUrl: string) => AccountApi.updateProfile({ avatar_url: dataUrl }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['account_current_user'] });
+      queryClient.invalidateQueries({ queryKey: ['account_profile'] });
+    },
+  });
 
+  // ── roles / permissions ───────────────────────────────────────────────────
   const { data: rolesData, isLoading: rolesLoading, error: rolesError } = useUserRolesQuery(username);
   const allRoles = useMemo(() => rolesData?.roles ?? [], [rolesData]);
 
   const { data: directPermsData, isLoading: directPermsLoading, error: directPermsError } = useMyPermissionsQuery();
   const allDirectPermissions = useMemo(() => directPermsData?.permissions ?? [], [directPermsData]);
 
-  // Single-tenant mode hides the Workspace column, so stale non-default
-  // rows would look like duplicates. Filter them out; null workspace
-  // (deleted resource) stays - could belong to any workspace.
   const roles = useMemo(
     () => (workspacesEnabled ? allRoles : allRoles.filter((r) => r.workspace === DEFAULT_WORKSPACE_NAME)),
     [allRoles, workspacesEnabled],
@@ -136,6 +561,15 @@ const AccountPage = () => {
         : allDirectPermissions.filter((p) => p.workspace == null || p.workspace === DEFAULT_WORKSPACE_NAME),
     [allDirectPermissions, workspacesEnabled],
   );
+
+  // ── change-password ───────────────────────────────────────────────────────
+  const closeChangePassword = () => {
+    setChangePasswordOpen(false);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setError(null);
+  };
 
   const handleChangePassword = async () => {
     setError(null);
@@ -149,7 +583,6 @@ const AccountPage = () => {
       );
       return;
     }
-
     if (!newPassword) {
       setError(
         intl.formatMessage({
@@ -159,32 +592,22 @@ const AccountPage = () => {
       );
       return;
     }
-
     if (newPassword !== confirmPassword) {
       setError(
         intl.formatMessage({
           defaultMessage: 'New password and confirmation do not match',
-          description: 'Validation error when new password and confirmation do not match',
+          description: 'Validation error when passwords do not match',
         }),
       );
       return;
     }
 
     try {
-      // Backend re-asserts current_password before applying the new one
-      // (defense in depth - see ``update_user_password``).
-      await updatePassword.mutateAsync({
-        username,
-        password: newPassword,
-        current_password: currentPassword,
-      });
+      await updatePassword.mutateAsync({ username, password: newPassword, current_password: currentPassword });
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       setChangePasswordOpen(false);
-      // Browser still has the old Basic Auth creds cached, so subsequent
-      // API calls would 401. Bounce home to trigger a fresh prompt - also
-      // serves as the success signal since there's no inline alert.
       performLogout(queryClient);
     } catch (e: unknown) {
       setError(
@@ -192,45 +615,110 @@ const AccountPage = () => {
           ? e.message
           : intl.formatMessage({
               defaultMessage: 'Failed to update password',
-              description: 'Generic error when password update fails for an unknown reason',
+              description: 'Generic error when password update fails',
             }),
       );
     }
   };
 
+  // ── empty-state for roles ─────────────────────────────────────────────────
   const rolesEmptyState =
     roles.length === 0 ? (
       <Empty
         title={intl.formatMessage({
           defaultMessage: 'No roles',
-          description: 'Empty-state title for the roles table on the account page',
+          description: 'Empty-state title for the roles table',
         })}
         description={intl.formatMessage({
           defaultMessage: 'You have not been assigned to any roles.',
-          description: 'Empty-state description for the roles table on the account page',
+          description: 'Empty-state description for the roles table',
         })}
       />
     ) : null;
 
+  // ── render ────────────────────────────────────────────────────────────────
   return (
     <ScrollablePageWrapper>
       <div css={{ padding: theme.spacing.md, display: 'flex', flexDirection: 'column', gap: theme.spacing.lg }}>
-        <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
-          <div css={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center' }}>
-              <Avatar
-                type="entity"
-                size="lg"
-                icon={<UserIcon />}
-                label={intl.formatMessage({
-                  defaultMessage: 'Profile',
-                  description: 'Accessible label for the profile-page icon avatar',
-                })}
+
+        {/* ── HEADER ── */}
+        <div
+          css={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: theme.spacing.lg,
+            flexWrap: 'wrap',
+          }}
+        >
+          {/* Left: avatar + name block */}
+          <div css={{ display: 'flex', gap: theme.spacing.lg, alignItems: 'flex-start' }}>
+            {profileLoading ? (
+              <div css={{ width: 96, height: 96, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Spinner size="large" />
+              </div>
+            ) : (
+              <ProfileAvatar
+                profile={profile}
+                onAvatarUploaded={(dataUrl) => avatarMutation.mutate(dataUrl)}
+                isUploading={avatarMutation.isLoading}
               />
+            )}
+
+            <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
               <Typography.Title withoutMargins level={2}>
-                <FormattedMessage defaultMessage="Profile" description="Profile page title" />
+                {profile?.display_name ?? username}
               </Typography.Title>
+
+              {username && (
+                <Typography.Text color="secondary" css={{ fontFamily: 'monospace' }}>
+                  @{username}
+                </Typography.Text>
+              )}
+
+              {/* Tenant + team badges */}
+              <div css={{ display: 'flex', gap: theme.spacing.xs, flexWrap: 'wrap', marginTop: theme.spacing.xs }}>
+                <TenantBadge />
+                {profile?.teams?.map((t) => (
+                  <Tag
+                    key={t.slug}
+                    componentId="account.team_badge"
+                    color={t.role === 'admin' ? 'indigo' : 'default'}
+                  >
+                    {t.name}
+                    {' · '}
+                    {t.role}
+                  </Tag>
+                ))}
+              </div>
             </div>
+          </div>
+
+          {/* Right: action buttons */}
+          <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+            {username && (
+              <Button
+                componentId="account.edit_profile_button"
+                type="primary"
+                onClick={() => setEditProfileOpen(true)}
+                disabled={!profile}
+              >
+                <FormattedMessage defaultMessage="Edit Profile" description="Button to open the edit profile modal" />
+              </Button>
+            )}
+            {isBasicAuth && username && (
+              <Button
+                componentId="account.change_password_button"
+                type="tertiary"
+                onClick={() => setChangePasswordOpen(true)}
+              >
+                <FormattedMessage
+                  defaultMessage="Change password"
+                  description="Button to open the change password modal"
+                />
+              </Button>
+            )}
             {isBasicAuth && username && (
               <Button
                 componentId="account.logout_button"
@@ -241,23 +729,9 @@ const AccountPage = () => {
               </Button>
             )}
           </div>
-          {username && (
-            <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
-              <Typography.Text color="secondary">
-                <FormattedMessage
-                  defaultMessage="Logged in as <strong>{username}</strong>"
-                  description="Subtitle showing the currently authenticated username"
-                  values={{
-                    username,
-                    strong: (chunks) => <strong>{chunks}</strong>,
-                  }}
-                />
-              </Typography.Text>
-              <TenantBadge />
-            </div>
-          )}
         </div>
 
+        {/* ── ALERTS ── */}
         {!username && !currentUserLoading && (
           <Alert
             componentId="account.no_user"
@@ -273,26 +747,88 @@ const AccountPage = () => {
           />
         )}
 
+        {profileError && (
+          <Alert
+            componentId="account.profile_error"
+            type="warning"
+            message={intl.formatMessage({
+              defaultMessage: 'Could not load profile',
+              description: 'Alert shown when the profile endpoint fails',
+            })}
+            description={(profileError as Error)?.message}
+          />
+        )}
+
         {error && !changePasswordOpen && (
-          // Modal renders its own Alert for ``error`` - don't double up.
           <Alert componentId="account.error" type="error" message={error} closable onClose={() => setError(null)} />
         )}
 
-        {isBasicAuth && (
-          <div>
-            <Button
-              componentId="account.change_password_button"
-              type="primary"
-              onClick={() => setChangePasswordOpen(true)}
-              disabled={!username}
-            >
-              <FormattedMessage
-                defaultMessage="Change password"
-                description="Button to open the change password modal"
-              />
-            </Button>
+        {/* ── INFO GRID ── */}
+        {profile && (
+          <div
+            css={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: theme.spacing.md,
+              padding: theme.spacing.md,
+              border: `1px solid ${theme.colors.border}`,
+              borderRadius: theme.general.borderRadiusBase,
+            }}
+          >
+            <InfoRow
+              label={<FormattedMessage defaultMessage="Email" description="Profile info: email label" />}
+              value={profile.email}
+            />
+            <InfoRow
+              label={<FormattedMessage defaultMessage="GitHub" description="Profile info: github label" />}
+              value={profile.github}
+            />
+            <InfoRow
+              label={<FormattedMessage defaultMessage="Title" description="Profile info: title label" />}
+              value={profile.title}
+            />
+            <InfoRow
+              label={<FormattedMessage defaultMessage="ORCID" description="Profile info: orcid label" />}
+              value={profile.orcid}
+            />
+            <InfoRow
+              label={<FormattedMessage defaultMessage="Department" description="Profile info: department label" />}
+              value={profile.department}
+            />
+            <InfoRow
+              label={<FormattedMessage defaultMessage="Bio" description="Profile info: bio label" />}
+              value={profile.bio}
+            />
+            <InfoRow
+              label={<FormattedMessage defaultMessage="Location" description="Profile info: location label" />}
+              value={profile.location}
+            />
           </div>
         )}
+
+        {/* ── TEAMS TABLE ── */}
+        {profile && (
+          <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+            <Typography.Title level={4} withoutMargins>
+              <FormattedMessage defaultMessage="My Teams" description="Section heading for teams table" />
+            </Typography.Title>
+            <TeamsTable teams={profile.teams ?? []} />
+          </div>
+        )}
+
+        {/* ── MODALS ── */}
+
+        {/* Edit Profile modal */}
+        {profile && editProfileOpen && (
+          <EditProfileModal
+            profile={profile}
+            visible={editProfileOpen}
+            onClose={() => setEditProfileOpen(false)}
+            onSaved={() => setEditProfileOpen(false)}
+          />
+        )}
+
+        {/* Change Password modal */}
         <Modal
           componentId="account.change_password_modal"
           title={intl.formatMessage({
@@ -320,10 +856,7 @@ const AccountPage = () => {
             )}
             <div>
               <Typography.Text bold>
-                <FormattedMessage
-                  defaultMessage="Current password"
-                  description="Label for the current-password field"
-                />
+                <FormattedMessage defaultMessage="Current password" description="Label for the current-password field" />
               </Typography.Text>
               <Input
                 componentId="account.current_password"
@@ -353,10 +886,7 @@ const AccountPage = () => {
             </div>
             <div>
               <Typography.Text bold>
-                <FormattedMessage
-                  defaultMessage="Confirm password"
-                  description="Label for the confirm-password field"
-                />
+                <FormattedMessage defaultMessage="Confirm password" description="Label for the confirm-password field" />
               </Typography.Text>
               <Input
                 componentId="account.confirm_password"
@@ -372,6 +902,7 @@ const AccountPage = () => {
           </div>
         </Modal>
 
+        {/* ── ROLES / PERMISSIONS TABS ── */}
         {username && (
           <Tabs.Root
             componentId="account.tabs"
@@ -395,6 +926,7 @@ const AccountPage = () => {
                 <FormattedMessage defaultMessage="Permissions" description="Tab trigger for the user's permissions" />
               </Tabs.Trigger>
             </Tabs.List>
+
             <Tabs.Content value="roles" css={{ paddingTop: theme.spacing.md }}>
               {rolesLoading ? (
                 <div
@@ -402,7 +934,6 @@ const AccountPage = () => {
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    gap: theme.spacing.sm,
                     padding: theme.spacing.lg,
                     minHeight: 200,
                   }}
@@ -415,13 +946,13 @@ const AccountPage = () => {
                   type="error"
                   message={intl.formatMessage({
                     defaultMessage: 'Failed to load roles',
-                    description: 'Alert title shown when the roles query fails on the account page',
+                    description: 'Alert title shown when the roles query fails',
                   })}
                   description={
                     (rolesError as Error)?.message ||
                     intl.formatMessage({
                       defaultMessage: 'An error occurred while fetching your roles.',
-                      description: 'Fallback description shown when the roles query has no error message',
+                      description: 'Fallback description for the roles error',
                     })
                   }
                 />
@@ -438,29 +969,23 @@ const AccountPage = () => {
                 >
                   <TableRow isHeader>
                     <TableHeader componentId="account.roles.name_header" css={{ flex: 2 }}>
-                      <FormattedMessage
-                        defaultMessage="Role"
-                        description="Roles table column header for the role name"
-                      />
+                      <FormattedMessage defaultMessage="Role" description="Roles table: role name column" />
                     </TableHeader>
                     {workspacesEnabled && (
                       <TableHeader componentId="account.roles.workspace_header" css={{ flex: 1 }}>
-                        <FormattedMessage
-                          defaultMessage="Workspace"
-                          description="Roles table column header for the workspace"
-                        />
+                        <FormattedMessage defaultMessage="Workspace" description="Roles table: workspace column" />
                       </TableHeader>
                     )}
                     <TableHeader componentId="account.roles.admin_header" css={{ flex: 1 }}>
                       {workspacesEnabled ? (
                         <FormattedMessage
                           defaultMessage="Workspace Manager"
-                          description="Roles table column header for the workspace-admin marker (multi-tenant)"
+                          description="Roles table: workspace-admin column (multi-tenant)"
                         />
                       ) : (
                         <FormattedMessage
                           defaultMessage="Admin"
-                          description="Roles table column header for the admin marker (single-tenant)"
+                          description="Roles table: admin column (single-tenant)"
                         />
                       )}
                     </TableHeader>
@@ -471,14 +996,10 @@ const AccountPage = () => {
                 </Table>
               )}
             </Tabs.Content>
+
             <Tabs.Content
               value="permissions"
-              css={{
-                paddingTop: theme.spacing.md,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: theme.spacing.md,
-              }}
+              css={{ paddingTop: theme.spacing.md, display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}
             >
               <PermissionsSection
                 roles={roles}

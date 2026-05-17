@@ -7,6 +7,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -65,6 +66,16 @@ class SqlUser(Base):
     username = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255))
     is_admin = Column(Boolean, default=False)
+    # Profile fields
+    display_name = Column(String(255), nullable=True)
+    email = Column(String(255), nullable=True)
+    title = Column(String(255), nullable=True)
+    department = Column(String(255), nullable=True)
+    location = Column(String(255), nullable=True)
+    bio = Column(Text(), nullable=True)
+    github = Column(String(255), nullable=True)
+    orcid = Column(String(64), nullable=True)
+    avatar_url = Column(Text(), nullable=True)
 
     memberships = relationship(
         "SqlTeamMembership",
@@ -84,6 +95,15 @@ class SqlUser(Base):
             username=self.username,
             password_hash=self.password_hash,
             is_admin=self.is_admin,
+            display_name=self.display_name,
+            email=self.email,
+            title=self.title,
+            department=self.department,
+            location=self.location,
+            bio=self.bio,
+            github=self.github,
+            orcid=self.orcid,
+            avatar_url=self.avatar_url,
         )
 
 
