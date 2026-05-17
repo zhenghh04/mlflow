@@ -28,6 +28,7 @@ FAIL = "\033[91m❌ FAIL\033[0m"
 SKIP = "\033[93m⚠️  SKIP\033[0m"
 
 results = []
+TS = str(int(__import__("time").time()))[-6:]  # unique suffix
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -87,7 +88,7 @@ print(f"     Providers: {providers}")
 section("2. Tenant (Team) Management")
 
 code, data = req("POST", "/api/3.0/mlflow/tenants/create",
-    {"slug": "test-team-alpha", "name": "Test Team Alpha", "storage_root": "/tmp/alpha"})
+    {"slug": f"test-alpha-{TS}", "name": f"Test Team Alpha {TS}", "storage_root": "/tmp/alpha"})
 check("Create tenant", code, 200, data.get("tenant", {}).get("slug", ""))
 
 code, data = req("GET", "/ajax-api/3.0/mlflow/tenants/list")
@@ -96,18 +97,18 @@ slugs = [t["slug"] for t in data.get("tenants", [])]
 print(f"     Tenants: {slugs}")
 
 code, data = req("PATCH", "/ajax-api/3.0/mlflow/tenants/update",
-    {"slug": "test-team-alpha", "name": "Test Team Alpha (renamed)"})
+    {"slug": f"test-alpha-{TS}", "name": f"Test Team Alpha {TS} renamed"})
 check("Update tenant name", code, 200)
 
 # ── Users ─────────────────────────────────────────────────────────────────────
 section("3. User Management")
 
 code, data = req("POST", "/api/2.0/mlflow/users/create",
-    {"username": "testuser_a", "password": "TestPass@1234!", "role": "member"},
-    tenant="test-team-alpha")
+    {"username": f"testuser_a_{TS}", "password": "TestPass@1234!", "role": "member"},
+    tenant=f"test-alpha-{TS}")
 check("Create user in team", code, 200, data.get("user", {}).get("username", ""))
 
-code, data = req("GET", "/api/2.0/mlflow/users/list", tenant="test-team-alpha")
+code, data = req("GET", "/api/2.0/mlflow/users/list", tenant=f"test-alpha-{TS}")
 check("List users in team", code, 200)
 usernames = [u["username"] for u in data.get("users", [])]
 print(f"     Users: {usernames}")
@@ -125,11 +126,11 @@ print(f"     Global admins: {admins}")
 section("4. Team Membership")
 
 code, data = req("POST", "/ajax-api/3.0/mlflow/teams/members/add",
-    {"username": "testuser_a", "role": "member"}, tenant="test-team-alpha")
+    {"username": f"testuser_a_{TS}", "role": "member"}, tenant=f"test-alpha-{TS}")
 check("Add existing user to team", code, 200)
 
 code, data = req("GET", "/ajax-api/3.0/mlflow/teams/members/list",
-    tenant="test-team-alpha")
+    tenant=f"test-alpha-{TS}")
 check("List team members", code, 200)
 members = [m["username"] for m in data.get("members", [])]
 print(f"     Members: {members}")
@@ -141,46 +142,46 @@ teams = [t["slug"] for t in data.get("teams", [])]
 print(f"     Admin teams: {teams}")
 
 code, _ = req("DELETE", "/ajax-api/3.0/mlflow/teams/members/remove",
-    {"username": "testuser_a"}, tenant="test-team-alpha")
+    {"username": f"testuser_a_{TS}"}, tenant=f"test-alpha-{TS}")
 check("Remove user from team", code, 200)
 
 # ── Projects (Experiments) ────────────────────────────────────────────────────
 section("5. Projects (Experiments)")
 
 code, data = req("POST", "/ajax-api/2.0/mlflow/experiments/create",
-    {"name": "test-project-alpha"}, tenant="test-team-alpha")
+    {"name": f"test-project-{TS}"}, tenant=f"test-alpha-{TS}")
 check("Create experiment/project", code, 200)
 exp_id = data.get("experiment_id", "")
 print(f"     Experiment ID: {exp_id}")
 
 code, data = req("POST", "/ajax-api/2.0/mlflow/experiments/search",
-    {"max_results": 50}, tenant="test-team-alpha")
+    {"max_results": 50}, tenant=f"test-alpha-{TS}")
 check("Search experiments", code, 200)
 exp_names = [e["name"] for e in data.get("experiments", []) if e.get("name") != "Default"]
 print(f"     Experiments: {exp_names}")
 
 if exp_id:
     code, _ = req("POST", "/ajax-api/2.0/mlflow/experiments/update",
-        {"experiment_id": exp_id, "new_name": "test-project-alpha-renamed"},
-        tenant="test-team-alpha")
+        {"experiment_id": exp_id, "new_name": f"test-project-{TS}-renamed"},
+        tenant=f"test-alpha-{TS}")
     check("Rename experiment", code, 200)
 
 # ── Tenant isolation ──────────────────────────────────────────────────────────
 section("6. Tenant Isolation")
 
 code, data = req("POST", "/api/3.0/mlflow/tenants/create",
-    {"slug": "test-team-beta", "name": "Test Team Beta"})
+    {"slug": f"test-beta-{TS}", "name": f"Test Team Beta {TS}"})
 check("Create second tenant", code, 200)
 
 code, _ = req("POST", "/api/2.0/mlflow/users/create",
-    {"username": "testuser_b", "password": "TestPass@5678!", "role": "member"},
-    tenant="test-team-beta")
+    {"username": f"testuser_b_{TS}", "password": "TestPass@5678!", "role": "member"},
+    tenant=f"test-beta-{TS}")
 check("Create user in beta team", code, 200)
 
 # testuser_b should not see alpha's experiments
 code, data = req("POST", "/api/2.0/mlflow/experiments/search",
-    {"max_results": 10}, auth=("testuser_b", "TestPass@5678!"),
-    tenant="test-team-beta")
+    {"max_results": 10}, auth=(f"testuser_b_{TS}", "TestPass@5678!"),
+    tenant=f"test-beta-{TS}")
 exp_names_b = [e["name"] for e in data.get("experiments", [])]
 alpha_leaked = any("alpha" in n for n in exp_names_b)
 icon = PASS if not alpha_leaked else FAIL
@@ -190,8 +191,8 @@ results.append(("Team isolation", not alpha_leaked))
 
 # testuser_b should not be able to access test-team-alpha
 code, _ = req("POST", "/api/2.0/mlflow/experiments/search",
-    {"max_results": 10}, auth=("testuser_b", "TestPass@5678!"),
-    tenant="test-team-alpha")
+    {"max_results": 10}, auth=(f"testuser_b_{TS}", "TestPass@5678!"),
+    tenant=f"test-alpha-{TS}")
 check("Cross-tenant access blocked (403)", code, 403)
 
 # ── Permissions ───────────────────────────────────────────────────────────────
@@ -199,14 +200,14 @@ section("7. Experiment Permissions")
 
 if exp_id:
     code, _ = req("POST", "/api/2.0/mlflow/experiments/permissions/create",
-        {"experiment_id": exp_id, "username": "testuser_a", "permission": "EDIT"},
-        tenant="test-team-alpha")
+        {"experiment_id": exp_id, "username": f"testuser_a_{TS}", "permission": "EDIT"},
+        tenant=f"test-alpha-{TS}")
     check("Grant EDIT permission", code, 200)
 
     code, data = req("GET",
         f"/api/2.0/mlflow/experiments/permissions/get"
         f"?experiment_id={exp_id}&username=testuser_a",
-        tenant="test-team-alpha")
+        tenant=f"test-alpha-{TS}")
     check("Get experiment permission", code, 200,
           data.get("experiment_permission", {}).get("permission", ""))
 
@@ -214,33 +215,33 @@ if exp_id:
 section("8. Model Registry")
 
 code, data = req("POST", "/ajax-api/2.0/mlflow/registered-models/create",
-    {"name": "test-model-alpha"}, tenant="test-team-alpha")
+    {"name": f"test-model-{TS}"}, tenant=f"test-alpha-{TS}")
 check("Create registered model", code, 200)
 
 code, data = req("GET",
     "/ajax-api/2.0/mlflow/registered-models/search?max_results=10",
-    tenant="test-team-alpha")
+    tenant=f"test-alpha-{TS}")
 check("Search registered models", code, 200)
 model_names = [m["name"] for m in data.get("registered_models", [])]
 print(f"     Models: {model_names}")
 
 code, data = req("POST",
     "/ajax-api/2.0/mlflow/registered-models/set-visibility",
-    {"name": "test-model-alpha", "visibility": "public"},
-    tenant="test-team-alpha")
+    {"name": f"test-model-{TS}", "visibility": "public"},
+    tenant=f"test-alpha-{TS}")
 check("Set model visibility=public", code, 200)
 
 # Beta user should now see the public model
 code, data = req("GET",
     "/ajax-api/2.0/mlflow/registered-models/search?max_results=10",
-    auth=("testuser_b", "TestPass@5678!"), tenant="test-team-beta")
+    auth=(f"testuser_b_{TS}", "TestPass@5678!"), tenant=f"test-beta-{TS}")
 public_models = [m["name"] for m in data.get("registered_models", [])]
 check("Public model visible to other team", code, 200, str(public_models))
 
 code, _ = req("POST",
     "/ajax-api/2.0/mlflow/registered-models/set-visibility",
-    {"name": "test-model-alpha", "visibility": "team"},
-    tenant="test-team-alpha")
+    {"name": f"test-model-{TS}", "visibility": "team"},
+    tenant=f"test-alpha-{TS}")
 check("Revert model visibility=team", code, 200)
 
 # ── Profile ───────────────────────────────────────────────────────────────────
@@ -259,7 +260,7 @@ check("Update profile", code, 200)
 section("10. Global Admin Management")
 
 code, _ = req("PATCH", "/api/2.0/mlflow/users/update-admin",
-    {"username": "testuser_a", "is_admin": True}, tenant="test-team-alpha")
+    {"username": f"testuser_a_{TS}", "is_admin": True}, tenant=f"test-alpha-{TS}")
 check("Promote to global admin", code, 200)
 
 code, data = req("GET", "/ajax-api/2.0/mlflow/users/global-admins")
@@ -268,7 +269,7 @@ admins = [u["username"] for u in data.get("users", [])]
 print(f"     Admins now: {admins}")
 
 code, _ = req("PATCH", "/api/2.0/mlflow/users/update-admin",
-    {"username": "testuser_a", "is_admin": False}, tenant="test-team-alpha")
+    {"username": f"testuser_a_{TS}", "is_admin": False}, tenant=f"test-alpha-{TS}")
 check("Demote from global admin", code, 200)
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
@@ -276,27 +277,27 @@ section("11. Cleanup (delete test resources)")
 
 if exp_id:
     code, _ = req("POST", "/ajax-api/2.0/mlflow/experiments/delete",
-        {"experiment_id": exp_id}, tenant="test-team-alpha")
+        {"experiment_id": exp_id}, tenant=f"test-alpha-{TS}")
     check("Delete experiment", code, 200)
 
 code, _ = req("DELETE", "/ajax-api/2.0/mlflow/registered-models/delete",
-    {"name": "test-model-alpha"}, tenant="test-team-alpha")
+    {"name": f"test-model-{TS}"}, tenant=f"test-alpha-{TS}")
 check("Delete registered model", code, 200)
 
 code, _ = req("DELETE", "/api/2.0/mlflow/users/delete",
-    {"username": "testuser_a"}, tenant="test-team-alpha")
+    {"username": f"testuser_a_{TS}"}, tenant=f"test-alpha-{TS}")
 check("Delete testuser_a", code, 200)
 
 code, _ = req("DELETE", "/api/2.0/mlflow/users/delete",
-    {"username": "testuser_b"}, tenant="test-team-beta")
+    {"username": f"testuser_b_{TS}"}, tenant=f"test-beta-{TS}")
 check("Delete testuser_b", code, 200)
 
 code, _ = req("DELETE", "/ajax-api/3.0/mlflow/tenants/delete",
-    {"slug": "test-team-alpha"})
+    {"slug": f"test-alpha-{TS}"})
 check("Delete test-team-alpha", code, 200)
 
 code, _ = req("DELETE", "/ajax-api/3.0/mlflow/tenants/delete",
-    {"slug": "test-team-beta"})
+    {"slug": f"test-beta-{TS}"})
 check("Delete test-team-beta", code, 200)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
