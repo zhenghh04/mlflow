@@ -43,3 +43,6 @@ PYTHONPATH="$PROJECT" \
     --backend-store-uri "sqlite:///$WORKDIR/tracking.db" \
     --artifacts-destination "$WORKDIR/artifacts" \
     --serve-artifacts
+# Note: use --allowed-hosts '*' when running behind a reverse proxy
+# (nginx/caddy) to allow any Host header. Without it MLflow's security
+# middleware rejects requests where Host != localhost.
