@@ -27,6 +27,7 @@ import { getGatewayRouteDefs } from './gateway/route-defs';
 import { getAccountRouteDefs } from './account/route-defs';
 import { getAdminRouteDefs } from './admin/route-defs';
 import { AccountRoutePaths } from './account/routes';
+const LazySSOCompletePage = React.lazy(() => import('./account/SSOCompletePage'));
 import { DEV_USER_SWITCHER_ENABLED } from './admin/DevUserSwitcher';
 import { useInitializeExperimentRunColors } from './experiment-tracking/components/experiment-page/hooks/useExperimentRunColor';
 import { MlflowSidebar } from './common/components/MlflowSidebar';
@@ -249,6 +250,15 @@ export const MlflowRouter = () => {
               element: (
                 <React.Suspense fallback={<LegacySkeleton />}>
                   <LazyLoginPage />
+                </React.Suspense>
+              ),
+            },
+            {
+              // SSO completion page — set cookies via JS after OAuth callback.
+              path: '/sso-complete',
+              element: (
+                <React.Suspense fallback={<LegacySkeleton />}>
+                  <LazySSOCompletePage />
                 </React.Suspense>
               ),
             },

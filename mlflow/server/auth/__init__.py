@@ -483,7 +483,8 @@ _UNPROTECTED_PATH_PREFIXES = (
 )
 # The root path serves index.html (just HTML, no secrets).
 # The React app detects 401 on API calls and redirects to /#/login.
-_UNPROTECTED_EXACT_PATHS = {"/", "/manifest.json", "/asset-manifest.json", "/sso/providers"}
+_UNPROTECTED_EXACT_PATHS = {"/", "/manifest.json", "/asset-manifest.json",
+                             "/sso/providers", "/sso/verify"}
 
 
 def is_unprotected_route(path: str) -> bool:
@@ -2686,18 +2687,13 @@ def sso_callback(provider_id: str):
     secret_key = app.secret_key or ""
     token = issue_session_token(username, secret_key)
 
-    # Redirect to the SPA root.  Set the token in TWO cookies:
-    #  1. mlflow_sso_token  — read by _authenticate_sso_token() server-side
-    #  2. mlflow-request-header-X-SSO-Token — picked up by FetchUtils and
-    #     forwarded as the X-SSO-Token HTTP header on every AJAX request,
-    #     giving the server an explicit (not implicit) auth signal regardless
-    #     of browser SameSite handling.
+    # Pass the token in the URL fragment so the React SSOCompletePage can
+    # set the cookie via JavaScript. This avoids the browser forwarding
+    # Set-Cookie headers across the ASGI redirect boundary.
+    from urllib.parse import quote as _quote
     resp = make_response()
     resp.status_code = 302
-    resp.headers["Location"] = "/"
-    resp.set_cookie(SSO_TOKEN_COOKIE, token, max_age=43200, httponly=False, samesite="Lax")
-    resp.set_cookie("mlflow-request-header-X-SSO-Token", token,
-                    max_age=43200, httponly=False, samesite="Lax")
+    resp.headers["Location"] = f"/#/sso-complete?t={_quote(token, safe='')}"
     return resp
 
 
@@ -2756,6 +2752,33 @@ def _sso_provision_user(
                 reset_active_tenant_slug(token)
         except Exception as exc:
             _logger.warning("SSO default_team assignment failed: %s", exc)
+
+
+@app.route("/sso/verify", methods=["GET"])
+def sso_verify():
+    """Verify an SSO token and return the username + team list.
+
+    Called by SSOCompletePage after it receives the token in the URL fragment.
+    The response allows the client to set the auth cookie via JavaScript.
+    """
+    token = request.args.get("t", "")
+    if not token:
+        return make_response(jsonify({"error": "missing token"}), 400)
+
+    secret_key = app.secret_key or ""
+    username = verify_session_token(token, secret_key)
+    if not username:
+        return make_response(jsonify({"error": "invalid or expired token"}), 401)
+
+    teams = store.get_user_teams(username)
+    preferred_team = next(
+        (t.slug for t, _ in teams if t.slug != "default"), "default"
+    )
+    return jsonify({
+        "username": username,
+        "token": token,
+        "preferred_team": preferred_team,
+    })
 
 
 @app.route("/sso/logout", methods=["POST", "GET"])
