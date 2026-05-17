@@ -406,6 +406,15 @@ export const AdminApi = {
     }) as Promise<{ experiment_permission?: { permission: string } }>;
   },
 
+  renameExperiment: (experimentId: string, newName: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/update',
+      method: 'POST',
+      body: JSON.stringify({ experiment_id: experimentId, new_name: newName }),
+      error: defaultErrorHandler,
+    });
+  },
+
   updateExperimentPermission: (experimentId: string, username: string, permission: string) => {
     return fetchEndpoint({
       relativeUrl: 'ajax-api/2.0/mlflow/experiments/permissions/update',

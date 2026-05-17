@@ -52,6 +52,7 @@ import {
   useExperimentsQuery,
   useCreateExperiment,
   useDeleteExperiment,
+  useRenameExperiment,
 } from '../hooks';
 
 const TEAM_ROLES = ['member', 'admin'] as const;
@@ -751,6 +752,7 @@ const ProjectsTab = () => {
   const { data, isLoading, error } = useExperimentsQuery();
   const createExperiment = useCreateExperiment();
   const deleteExperiment = useDeleteExperiment();
+  const renameExperiment = useRenameExperiment();
   const isAdmin = useCurrentUserIsAdmin();
 
   const [showCreate, setShowCreate] = useState(false);
@@ -758,6 +760,37 @@ const ProjectsTab = () => {
   const [createError, setCreateError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [permissionsTarget, setPermissionsTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // Inline rename state: maps experimentId → draft name (undefined = not editing)
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  const startRename = (id: string, currentName: string) => {
+    setRenamingId(id);
+    setRenameValue(currentName);
+    setRenameError(null);
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameValue('');
+    setRenameError(null);
+  };
+
+  const commitRename = async (experimentId: string) => {
+    setRenameError(null);
+    if (!renameValue.trim()) {
+      setRenameError('Name cannot be empty');
+      return;
+    }
+    try {
+      await renameExperiment.mutateAsync({ experimentId, newName: renameValue.trim() });
+      setRenamingId(null);
+    } catch (e: unknown) {
+      setRenameError(e instanceof Error ? e.message : 'Failed to rename project');
+    }
+  };
 
   const experiments = useMemo(
     () => (data?.experiments ?? []).filter((e) => e.lifecycle_stage === 'active'),
@@ -872,40 +905,99 @@ const ProjectsTab = () => {
             <FormattedMessage defaultMessage="Actions" description="Projects table actions header" />
           </TableHeader>
         </TableRow>
-        {experiments.map((exp) => (
-          <TableRow key={exp.experiment_id}>
-            <TableCell css={{ flex: 3 }}>
-              <Typography.Text>{exp.name}</Typography.Text>
-            </TableCell>
-            <TableCell css={{ flex: 1 }}>
-              <Typography.Text color="secondary">{exp.experiment_id}</Typography.Text>
-            </TableCell>
-            <TableCell css={{ flex: 2 }}>
-              <div css={{ display: 'flex', gap: theme.spacing.xs }}>
-                <Button
-                  componentId="admin.projects.permissions_button"
-                  type="tertiary"
-                  size="small"
-                  onClick={() => setPermissionsTarget({ id: exp.experiment_id, name: exp.name })}
-                >
-                  <FormattedMessage defaultMessage="Manage access" description="Button to open project permissions" />
-                </Button>
-                {isAdmin && (
-                  <Button
-                    componentId="admin.projects.delete_button"
-                    type="tertiary"
-                    danger
-                    size="small"
-                    loading={deleteExperiment.isLoading}
-                    onClick={() => handleDelete(exp.experiment_id)}
-                  >
-                    <FormattedMessage defaultMessage="Delete" description="Delete project button" />
-                  </Button>
+        {experiments.map((exp) => {
+          const isRenaming = renamingId === exp.experiment_id;
+          return (
+            <TableRow key={exp.experiment_id}>
+              {/* Name cell — inline editable */}
+              <TableCell css={{ flex: 3 }}>
+                {isRenaming ? (
+                  <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                    <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                      <Input
+                        componentId="admin.projects.rename_input"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitRename(exp.experiment_id);
+                          if (e.key === 'Escape') cancelRename();
+                        }}
+                        autoFocus
+                        css={{ flex: 1 }}
+                      />
+                      <Button
+                        componentId="admin.projects.rename_save"
+                        type="primary"
+                        size="small"
+                        loading={renameExperiment.isLoading}
+                        onClick={() => commitRename(exp.experiment_id)}
+                      >
+                        <FormattedMessage defaultMessage="Save" description="Save rename button" />
+                      </Button>
+                      <Button
+                        componentId="admin.projects.rename_cancel"
+                        type="tertiary"
+                        size="small"
+                        onClick={cancelRename}
+                      >
+                        <FormattedMessage defaultMessage="Cancel" description="Cancel rename button" />
+                      </Button>
+                    </div>
+                    {renameError && (
+                      <Alert
+                        componentId="admin.projects.rename_error"
+                        type="error"
+                        message={renameError}
+                        closable
+                        onClose={() => setRenameError(null)}
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.xs }}>
+                    <Typography.Text>{exp.name}</Typography.Text>
+                    <Button
+                      componentId="admin.projects.rename_button"
+                      type="tertiary"
+                      size="small"
+                      onClick={() => startRename(exp.experiment_id, exp.name)}
+                      css={{ opacity: 0.5, '&:hover': { opacity: 1 } }}
+                    >
+                      <FormattedMessage defaultMessage="Rename" description="Rename project button" />
+                    </Button>
+                  </div>
                 )}
-              </div>
-            </TableCell>
-          </TableRow>
-        ))}
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                <Typography.Text color="secondary">{exp.experiment_id}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>
+                <div css={{ display: 'flex', gap: theme.spacing.xs }}>
+                  <Button
+                    componentId="admin.projects.permissions_button"
+                    type="tertiary"
+                    size="small"
+                    onClick={() => setPermissionsTarget({ id: exp.experiment_id, name: exp.name })}
+                  >
+                    <FormattedMessage defaultMessage="Manage access" description="Button to open project permissions" />
+                  </Button>
+                  {isAdmin && (
+                    <Button
+                      componentId="admin.projects.delete_button"
+                      type="tertiary"
+                      danger
+                      size="small"
+                      loading={deleteExperiment.isLoading}
+                      onClick={() => handleDelete(exp.experiment_id)}
+                    >
+                      <FormattedMessage defaultMessage="Delete" description="Delete project button" />
+                    </Button>
+                  )}
+                </div>
+              </TableCell>
+            </TableRow>
+          );
+        })}
       </Table>
 
       {/* Create project modal */}

@@ -411,6 +411,17 @@ export const useDeleteExperiment = () => {
   });
 };
 
+export const useRenameExperiment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ experimentId, newName }: { experimentId: string; newName: string }) =>
+      AdminApi.renameExperiment(experimentId, newName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminExperimentQueryKeys.experiments });
+    },
+  });
+};
+
 export const useExperimentPermissionQuery = (experimentId: string, username: string) => {
   return useQuery({
     queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
