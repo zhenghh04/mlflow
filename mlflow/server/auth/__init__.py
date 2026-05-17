@@ -372,6 +372,12 @@ store = SqlAlchemyStore()
 # SSO config — loaded lazily when routes are registered
 _sso_config = None
 
+# Server-side OAuth state store: {state_token: expiry_timestamp}
+# Avoids relying on SameSite cookies which are unreliable on localhost
+# when the OAuth redirect chain crosses domain boundaries.
+_sso_states: dict[str, float] = {}
+
+
 def _get_sso_config():
     global _sso_config
     if _sso_config is None:
@@ -2582,19 +2588,22 @@ def sso_login():
         return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
 
     import secrets as _secrets
+    import time as _time
     state = _secrets.token_urlsafe(32)
     redirect_uri = f"{sso.server_url.rstrip('/')}/sso/callback/{provider_id}"
+
+    # Store state server-side (avoids SameSite cookie issues on localhost)
+    _sso_states[state] = _time.time() + 600  # 10-minute TTL
+    # Evict expired states while we're here
+    now = _time.time()
+    for s in [k for k, exp in _sso_states.items() if exp < now]:
+        _sso_states.pop(s, None)
 
     auth_url = build_authorization_url(provider, redirect_uri, state)
 
     resp = make_response()
     resp.status_code = 302
     resp.headers["Location"] = auth_url
-    # Store state in a short-lived cookie for CSRF protection
-    resp.set_cookie(
-        SSO_STATE_COOKIE, state, max_age=600,
-        httponly=True, samesite="Lax",
-    )
     return resp
 
 
@@ -2609,11 +2618,15 @@ def sso_callback(provider_id: str):
     if not provider or not provider.client_id:
         return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
 
-    # CSRF check
+    # CSRF check — verify state against server-side store (no cookie needed)
+    import time as _time
     received_state = request.args.get("state", "")
-    stored_state = request.cookies.get(SSO_STATE_COOKIE, "")
-    if not received_state or received_state != stored_state:
-        return make_response("SSO state mismatch — possible CSRF attack", 400)
+    if not received_state or received_state not in _sso_states:
+        return make_response("SSO state invalid or expired — please try logging in again", 400)
+    if _sso_states[received_state] < _time.time():
+        _sso_states.pop(received_state, None)
+        return make_response("SSO state expired — please try logging in again", 400)
+    _sso_states.pop(received_state, None)  # one-time use
 
     # Exchange code
     code = request.args.get("code", "")
@@ -2646,14 +2659,11 @@ def sso_callback(provider_id: str):
     secret_key = app.secret_key or ""
     token = issue_session_token(username, secret_key)
 
-    # Redirect to the SPA root with the token stored in a cookie
-    frontend_url = "/"
+    # Redirect to the SPA root with the session JWT in a cookie
     resp = make_response()
     resp.status_code = 302
-    resp.headers["Location"] = frontend_url
-    resp.set_cookie(SSO_TOKEN_COOKIE, token, max_age=86400, httponly=False, samesite="Lax")
-    # Clear state cookie
-    resp.set_cookie(SSO_STATE_COOKIE, "", max_age=0)
+    resp.headers["Location"] = "/"
+    resp.set_cookie(SSO_TOKEN_COOKIE, token, max_age=43200, httponly=False, samesite="Lax")
     return resp
 
 
