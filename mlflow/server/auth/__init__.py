@@ -516,6 +516,17 @@ def make_basic_auth_response() -> Response:
         res.headers["Location"] = f"{base}#/login"
         res.headers["Content-Type"] = "text/html; charset=utf-8"
         return res
+    # API and GraphQL clients expect JSON — returning plain text causes
+    # JSON.parse errors in the React frontend on the graphql endpoint.
+    path = request.path
+    is_api = path.startswith(("/api/", "/ajax-api/", "/graphql"))
+    if is_api:
+        res = make_response(jsonify({
+            "error_code": "UNAUTHENTICATED",
+            "message": "You are not authenticated.",
+        }))
+        res.status_code = 401
+        return res
     res = make_response(
         "You are not authenticated. Please see "
         "https://www.mlflow.org/docs/latest/auth/index.html#authenticating-to-mlflow "
@@ -529,6 +540,15 @@ def make_basic_auth_response() -> Response:
 
 
 def make_forbidden_response() -> Response:
+    path = request.path
+    is_api = path.startswith(("/api/", "/ajax-api/", "/graphql"))
+    if is_api:
+        res = make_response(jsonify({
+            "error_code": "PERMISSION_DENIED",
+            "message": "Permission denied.",
+        }))
+        res.status_code = 403
+        return res
     res = make_response("Permission denied")
     res.status_code = 403
     return res
