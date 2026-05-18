@@ -24,13 +24,17 @@ from mlflow.system_metrics.metrics.base_metrics_monitor import BaseMetricsMonito
 
 _logger = logging.getLogger(__name__)
 
-# xpu-smi metric type IDs
+# xpu-smi metric type IDs — validated on xpu-smi 1.2.42 (Sunspot / Aurora)
+# Full list via: xpu-smi dump --help
+# Dump CSV format: Timestamp, DeviceId, <metrics in requested order>
 _XSI_GPU_UTIL = 0     # GPU Utilization (%)
-_XSI_POWER = 5        # Power Draw (mW)
-_XSI_MEM_USED = 18    # Memory Used (MiB)
-_XSI_MEM_TOTAL = 17   # Memory Total (MiB)
+_XSI_POWER    = 1     # GPU Power (W)         ← NOT metric 5
+_XSI_MEM_UTIL = 5     # GPU Memory Utilization (%)
+_XSI_MEM_USED = 18    # GPU Memory Used (MiB)
 
-_METRIC_IDS = f"{_XSI_GPU_UTIL},{_XSI_POWER},{_XSI_MEM_USED},{_XSI_MEM_TOTAL}"
+_METRIC_IDS = f"{_XSI_GPU_UTIL},{_XSI_POWER},{_XSI_MEM_UTIL},{_XSI_MEM_USED}"
+# CSV columns after Timestamp, DeviceId:
+#   col2 = GPU Util (%)   col3 = Power (W)   col4 = Mem Util (%)   col5 = Mem Used (MiB)
 
 
 def _xpu_smi(*args, timeout=5):
@@ -75,21 +79,23 @@ def _parse_dump_line(line: str, device_id: int) -> dict:
     """
     Parse one CSV line from ``xpu-smi dump -d N -m METRICS -n 1``.
 
-    Typical output (columns vary by xpu-smi version):
-      Device, Tile, GPU Util (%), Power (mW), Mem Used (MiB), Mem Total (MiB), Timestamp
-      0, -1, 42.0, 120000, 8192, 32768, 2024-...
+    xpu-smi 1.2.42+ (Sunspot / Aurora) format — timestamp-first:
+      Timestamp, DeviceId, col0_metric, col1_metric, ...
+      14:06:57.917,    0, 0.00, 78.17, ...
 
-    We parse by column position after stripping the header row.
-    Returns dict with keys: util_pct, power_mw, mem_used_mib, mem_total_mib
+    Older hypothetical format — device-first (kept for compatibility):
+      DeviceId, TileId, col0_metric, ..., Timestamp
+      0, -1, 42.0, 8192, ..., 2024-...
+
+    Column offsets for metrics depend on the detected format.
+    Returns dict with keys matching _METRIC_IDS order:
+      metrics[0] → util_pct
+      metrics[1] → mem_util_pct  (xpu-smi metric 5)
+      metrics[2] → mem_used_mib  (xpu-smi metric 18)
     """
     parts = [p.strip() for p in line.split(",")]
-    # Skip header lines
-    if not parts or not parts[0].lstrip("-").isdigit():
+    if not parts:
         return {}
-    if int(parts[0]) != device_id:
-        return {}
-    # Tile == -1 means aggregated (whole device), prefer that
-    tile = int(parts[1]) if len(parts) > 1 else -1
 
     def _float(idx):
         try:
@@ -97,12 +103,45 @@ def _parse_dump_line(line: str, device_id: int) -> dict:
         except (IndexError, ValueError):
             return None
 
+    col0 = parts[0]
+    # New format: col0 is a timestamp containing ":" (e.g. "14:06:57.917")
+    # With _METRIC_IDS = "0,1,5,18":
+    #   col2 = GPU Util(%)  col3 = Power(W)  col4 = Mem Util(%)  col5 = Mem Used(MiB)
+    if ":" in col0:
+        if len(parts) < 3:
+            return {}
+        try:
+            dev = int(parts[1])
+        except ValueError:
+            return {}  # header row — skip
+        if dev != device_id:
+            return {}
+        return {
+            "tile": -1,
+            "util_pct":     _float(2),
+            "power_w":      _float(3),   # watts directly (not mW)
+            "mem_util_pct": _float(4),
+            "mem_used_mib": _float(5),
+            "power_mw":     None,
+            "mem_total_mib": None,
+        }
+
+    # Old format: col0 is DeviceId (integer)
+    if not col0.lstrip("-").isdigit():
+        return {}
+    try:
+        if int(col0) != device_id:
+            return {}
+    except ValueError:
+        return {}
+    tile = int(parts[1]) if len(parts) > 1 else -1
     return {
         "tile": tile,
-        "util_pct": _float(2),
-        "power_mw": _float(3),
+        "util_pct":     _float(2),
+        "power_mw":     _float(3),
         "mem_used_mib": _float(4),
         "mem_total_mib": _float(5),
+        "mem_util_pct": None,
     }
 
 
@@ -171,40 +210,36 @@ class XPUMonitor(BaseMetricsMonitor):
                 _logger.warning(f"xpu-smi dump failed for device {dev_id}: {e}")
                 continue
 
-            # Aggregate per-device (prefer tile=-1 rows; average if only tile rows)
-            tile_data = defaultdict(list)
+            # Collect all parsed rows; prefer tile=-1 (device aggregate)
+            rows = []
             for line in out.splitlines():
                 parsed = _parse_dump_line(line, dev_id)
-                if not parsed:
-                    continue
-                tile_data[parsed["tile"]].append(parsed)
+                if parsed:
+                    rows.append(parsed)
 
-            # Prefer the aggregated tile=-1 row; otherwise average tile rows
-            rows = tile_data.get(-1) or []
             if not rows:
-                all_rows = [r for rows in tile_data.values() for r in rows]
-                if not all_rows:
-                    continue
-                # Average numeric fields across tiles
-                row = {
-                    "util_pct": _avg(r["util_pct"] for r in all_rows),
-                    "power_mw": _avg(r["power_mw"] for r in all_rows),
-                    "mem_used_mib": _avg(r["mem_used_mib"] for r in all_rows),
-                    "mem_total_mib": _avg(r["mem_total_mib"] for r in all_rows),
-                }
-            else:
-                row = rows[0]
+                continue
+
+            # Use tile=-1 row when present; otherwise average across all rows
+            agg_rows = [r for r in rows if r.get("tile") == -1]
+            row = agg_rows[0] if agg_rows else {
+                "util_pct":     _avg(r.get("util_pct")     for r in rows),
+                "mem_util_pct": _avg(r.get("mem_util_pct") for r in rows),
+                "mem_used_mib": _avg(r.get("mem_used_mib") for r in rows),
+                "power_mw":     _avg(r.get("power_mw")     for r in rows),
+                "mem_total_mib": None,
+            }
 
             if row.get("util_pct") is not None:
                 self._metrics[f"gpu_{dev_id}_utilization_percentage"].append(row["util_pct"])
-            if row.get("mem_used_mib") is not None and row.get("mem_total_mib"):
-                mem_used = row["mem_used_mib"]
-                mem_total = row["mem_total_mib"]
-                self._metrics[f"gpu_{dev_id}_memory_usage_megabytes"].append(mem_used)
-                self._metrics[f"gpu_{dev_id}_memory_usage_percentage"].append(
-                    round(mem_used / mem_total * 100, 1)
-                )
-            if row.get("power_mw") is not None:
+            if row.get("mem_util_pct") is not None:
+                self._metrics[f"gpu_{dev_id}_memory_usage_percentage"].append(row["mem_util_pct"])
+            if row.get("mem_used_mib") is not None:
+                self._metrics[f"gpu_{dev_id}_memory_usage_megabytes"].append(row["mem_used_mib"])
+            # power_w = watts (new format); power_mw = milliwatts (old format)
+            if row.get("power_w") is not None:
+                self._metrics[f"gpu_{dev_id}_power_usage_watts"].append(row["power_w"])
+            elif row.get("power_mw") is not None:
                 self._metrics[f"gpu_{dev_id}_power_usage_watts"].append(row["power_mw"] / 1000)
 
     def _collect_ipex(self):
