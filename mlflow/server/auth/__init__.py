@@ -2807,7 +2807,7 @@ def sso_logout():
     """Clear all auth cookies server-side and redirect to the login page."""
     resp = make_response()
     resp.status_code = 302
-    resp.headers["Location"] = "/#/login"
+    resp.headers["Location"] = "/oauth2/sign_out?rd=https%3A%2F%2Fauth.globus.org%2Fv2%2Fweb%2Flogout"
     # Clear every auth cookie the server knows about — server-side Set-Cookie
     # is reliable regardless of Secure/SameSite attributes.
     _all_auth_cookies = [
