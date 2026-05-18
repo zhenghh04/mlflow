@@ -15,6 +15,7 @@ from mlflow.system_metrics.metrics.disk_monitor import DiskMonitor
 from mlflow.system_metrics.metrics.gpu_monitor import GPUMonitor
 from mlflow.system_metrics.metrics.network_monitor import NetworkMonitor
 from mlflow.system_metrics.metrics.rocm_monitor import ROCMMonitor
+from mlflow.system_metrics.metrics.xpu_monitor import XPUMonitor
 
 _logger = logging.getLogger(__name__)
 
@@ -206,11 +207,17 @@ class SystemMetricsMonitor:
         except Exception:
             _logger.debug("Failed to initialize GPU monitor for NVIDIA GPU.", exc_info=True)
 
-        # Falling back to pyrocml (AMD/HIP GPU)
+        # Falling back to pyrsmi (AMD/HIP GPU)
         try:
             return ROCMMonitor()
         except Exception:
             _logger.debug("Failed to initialize GPU monitor for AMD/HIP GPU.", exc_info=True)
+
+        # Falling back to xpu-smi / IPEX (Intel XPU / PVC)
+        try:
+            return XPUMonitor()
+        except Exception:
+            _logger.debug("Failed to initialize GPU monitor for Intel XPU.", exc_info=True)
 
         _logger.info("Skip logging GPU metrics. Set logger level to DEBUG for more details.")
         return None
