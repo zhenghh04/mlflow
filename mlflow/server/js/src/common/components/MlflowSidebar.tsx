@@ -27,7 +27,7 @@ import { Link, matchPath, useLocation, useNavigate, useParams, useSearchParams }
 import ExperimentTrackingRoutes from '../../experiment-tracking/routes';
 import { ModelRegistryRoutes } from '../../model-registry/routes';
 import GatewayRoutes from '../../gateway/routes';
-import AccountRoutes from '../../account/routes';
+import AccountRoutes, { AccountRoutePaths } from '../../account/routes';
 import AdminRoutes from '../../admin/routes';
 import { useCurrentUserIsAdmin, useCurrentUserQuery, useIsBasicAuth } from '../../account/hooks';
 import { performLogout } from '../../account/auth-utils';
@@ -48,6 +48,7 @@ import { MlflowSidebarExperimentItems } from './MlflowSidebarExperimentItems';
 import { MlflowSidebarGatewayItems } from './MlflowSidebarGatewayItems';
 import { MlflowSidebarSettingsItems } from './MlflowSidebarSettingsItems';
 import { MlflowSidebarWorkflowSwitch } from './MlflowSidebarWorkflowSwitch';
+import { TeamSelector } from './TeamSelector';
 
 const isInsideExperiment = (location: Location) =>
   Boolean(matchPath('/experiments/:experimentId/*', location.pathname));
@@ -326,6 +327,7 @@ export function MlflowSidebar({
         />
       </div>
       {workspacesEnabled && showSidebar && <WorkspaceSelector />}
+      <TeamSelector collapsed={!showSidebar} />
       {workspacesEnabled && !showWorkspaceMenuItems && (
         <MlflowSidebarLink
           key="mlflow.sidebar.workspace_home_link"
@@ -457,14 +459,14 @@ export function MlflowSidebar({
               <FormattedMessage defaultMessage="Settings" description="Sidebar link for settings page" />
             </MlflowSidebarLink>
           )}
-          {isAuthAvailable && username && (
-            <div
-              css={{
-                marginTop: theme.spacing.sm,
-                paddingTop: theme.spacing.sm,
-                borderTop: `1px solid ${theme.colors.border}`,
-              }}
-            >
+          <div
+            css={{
+              marginTop: theme.spacing.sm,
+              paddingTop: theme.spacing.sm,
+              borderTop: `1px solid ${theme.colors.border}`,
+            }}
+          >
+            {isAuthAvailable && username ? (
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild>
                   {/*
@@ -535,7 +537,7 @@ export function MlflowSidebar({
                     }}
                     onClick={() => navigate(AccountRoutes.accountPageRoute)}
                   >
-                    <FormattedMessage defaultMessage="Account" description="Sidebar account menu item" />
+                    <FormattedMessage defaultMessage="Profile" description="Sidebar account dropdown item linking to the user profile page" />
                   </DropdownMenu.Item>
                   {canManage && (
                     <DropdownMenu.Item
@@ -561,14 +563,26 @@ export function MlflowSidebar({
                         }}
                         onClick={() => performLogout(queryClient)}
                       >
-                        <FormattedMessage defaultMessage="Logout" description="Sidebar logout menu item" />
+                        <FormattedMessage defaultMessage="Log out" description="Sidebar logout menu item" />
                       </DropdownMenu.Item>
                     </>
                   )}
                 </DropdownMenu.Content>
               </DropdownMenu.Root>
-            </div>
-          )}
+            ) : (
+              /* Show a Login button when no user is authenticated */
+              <MlflowSidebarLink
+                disableWorkspacePrefix
+                to={AccountRoutePaths.loginPage}
+                componentId="mlflow.sidebar.login_link"
+                isActive={() => false}
+                icon={<Avatar type="user" size="sm" label="?" />}
+                collapsed={!showSidebar}
+              >
+                <FormattedMessage defaultMessage="Log in" description="Sidebar login link for unauthenticated users" />
+              </MlflowSidebarLink>
+            )}
+          </div>
         </div>
       </nav>
     </aside>

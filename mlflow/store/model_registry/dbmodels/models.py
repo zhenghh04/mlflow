@@ -48,13 +48,32 @@ class SqlRegisteredModel(Base):
 
     name = Column(String(256), nullable=False)
 
+    tenant = Column(
+        String(63),
+        nullable=False,
+        default="default",
+        server_default=sa.text("'default'"),
+    )
+
+    visibility = Column(
+        String(16),
+        nullable=False,
+        default="team",
+        server_default=sa.text("'team'"),
+    )
+    """Visibility scope: 'team' (default, tenant-private) or 'public' (any authenticated user)."""
+
     creation_time = Column(BigInteger, default=get_current_time_millis)
 
     last_updated_time = Column(BigInteger, nullable=True, default=None)
 
     description = Column(String(5000), nullable=True)
 
-    __table_args__ = (PrimaryKeyConstraint("workspace", "name", name="registered_model_pk"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("workspace", "name", name="registered_model_pk"),
+        sa.UniqueConstraint("tenant", "workspace", "name", name="uq_registered_models_tenant"),
+        sa.Index("idx_registered_models_tenant", "tenant"),
+    )
 
     def __repr__(self):
         return (

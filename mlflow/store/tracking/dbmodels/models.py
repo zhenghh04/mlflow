@@ -141,6 +141,16 @@ class SqlExperiment(Base):
     Workspace identifier for this experiment: `String` (limit 63 characters). Defaults to
     ``'default'`` when not explicitly provided.
     """
+    tenant = Column(
+        String(63),
+        nullable=False,
+        default="default",
+        server_default=sa.text("'default'"),
+    )
+    """
+    Tenant slug this experiment belongs to. Defaults to ``'default'``.
+    Experiments are isolated per tenant: queries always filter by the active tenant.
+    """
     artifact_location = Column(String(256), nullable=True)
     """
     Default artifact location for this experiment: `String` (limit 256 characters). Defined as
@@ -166,7 +176,8 @@ class SqlExperiment(Base):
             name="experiments_lifecycle_stage",
         ),
         PrimaryKeyConstraint("experiment_id", name="experiment_pk"),
-        UniqueConstraint("workspace", "name", name="uq_experiments_workspace_name"),
+        UniqueConstraint("tenant", "workspace", "name", name="uq_experiments_tenant_workspace_name"),
+        sa.Index("idx_experiments_tenant", "tenant"),
     )
 
     def __repr__(self):

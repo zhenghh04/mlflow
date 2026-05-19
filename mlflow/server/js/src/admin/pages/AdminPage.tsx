@@ -4,6 +4,10 @@ import {
   Button,
   Checkbox,
   Empty,
+  Input,
+  Modal,
+  SimpleSelect,
+  SimpleSelectOption,
   Spinner,
   Table,
   TableCell,
@@ -33,12 +37,288 @@ import {
   useDeleteUser,
   useRolesQuery,
   useDeleteRole,
+  useUpdateAdmin,
   useWithSettingsReturnTo,
+  useTeamMembersQuery,
+  useAddTeamMember,
+  useRemoveTeamMember,
 } from '../hooks';
 import { isWorkspaceAdminRole } from '../types';
 import { CreateUserModal } from '../components/CreateUserModal';
 import { CreateRoleModal } from '../components/CreateRoleModal';
 import { UserRolesCell } from '../components/UserRolesCell';
+import { ProjectPermissionsModal } from '../components/ProjectPermissionsModal';
+import {
+  useExperimentsQuery,
+  useCreateExperiment,
+  useDeleteExperiment,
+  useRenameExperiment,
+  useRegisteredModelsQuery,
+  useSetModelVisibility,
+  useGlobalAdminsQuery,
+  useTeamsQuery,
+  useCreateTeam,
+  useDeleteTeam,
+  useUpdateTeam,
+} from '../hooks';
+
+const TEAM_ROLES = ['member', 'admin'] as const;
+
+/** Inline sub-section for managing active-team members. */
+/**
+ * Shows every user in the system and lets system admins promote/demote the
+ * global-admin flag (users.is_admin).  Visible only to is_global_admin users.
+ */
+const GlobalAdminsSection = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data: globalAdminsData, isLoading } = useGlobalAdminsQuery();
+  const { data: currentUserData } = useCurrentUserQuery();
+  const updateAdmin = useUpdateAdmin();
+
+  const currentUsername = currentUserData?.user?.username;
+  // System-wide list from /users/global-admins — not limited to the active team
+  const globalAdmins = useMemo(
+    () => globalAdminsData?.users ?? [],
+    [globalAdminsData],
+  );
+
+  const toggleAdmin = async (username: string, makeAdmin: boolean) => {
+    await updateAdmin.mutateAsync({ username, is_admin: makeAdmin });
+  };
+
+  return (
+    <div
+      css={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: theme.spacing.sm,
+        padding: theme.spacing.md,
+        border: `1px solid ${theme.colors.border}`,
+        borderRadius: theme.general.borderRadiusBase,
+        backgroundColor: theme.colors.backgroundSecondary,
+      }}
+    >
+      <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+        <Typography.Title level={4} withoutMargins>
+          <FormattedMessage defaultMessage="Global Admins" description="Global admins section title" />
+        </Typography.Title>
+        <Tag componentId="admin.global_admins.badge" color="indigo">
+          <FormattedMessage defaultMessage="Full system control" description="Global admin badge" />
+        </Tag>
+      </div>
+      <Typography.Hint>
+        <FormattedMessage
+          defaultMessage="Global admins have full control across all teams — they can access any team, manage users, and delete tenants."
+          description="Global admins explanation"
+        />
+      </Typography.Hint>
+      {isLoading ? (
+        <Spinner size="small" />
+      ) : (
+        <Table
+          scrollable
+          noMinHeight
+          css={{
+            border: `1px solid ${theme.colors.border}`,
+            borderRadius: theme.general.borderRadiusBase,
+            overflow: 'hidden',
+          }}
+        >
+          <TableRow isHeader>
+            <TableHeader componentId="admin.global_admins.username_header" css={{ flex: 2 }}>
+              <FormattedMessage defaultMessage="Username" description="Global admins table username header" />
+            </TableHeader>
+            <TableHeader componentId="admin.global_admins.status_header" css={{ flex: 2 }}>
+              <FormattedMessage defaultMessage="Status" description="Global admins table status header" />
+            </TableHeader>
+            <TableHeader componentId="admin.global_admins.actions_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Actions" description="Global admins table actions header" />
+            </TableHeader>
+          </TableRow>
+          {globalAdmins.map((user) => (
+            <TableRow key={user.username}>
+              <TableCell css={{ flex: 2 }}>
+                <Typography.Text>{user.username}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>
+                <Tag componentId="admin.global_admins.admin_tag" color="indigo">
+                  <FormattedMessage defaultMessage="Global Admin" description="Global admin tag" />
+                </Tag>
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                {user.username !== currentUsername && (
+                  <Button
+                    componentId="admin.global_admins.toggle_button"
+                    type="tertiary"
+                    danger
+                    size="small"
+                    loading={updateAdmin.isLoading}
+                    onClick={() => toggleAdmin(user.username, false)}
+                  >
+                    {user.is_admin ? (
+                      <FormattedMessage defaultMessage="Revoke" description="Revoke global admin button" />
+                    ) : (
+                      <FormattedMessage defaultMessage="Make Global Admin" description="Promote to global admin button" />
+                    )}
+                  </Button>
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </Table>
+      )}
+    </div>
+  );
+};
+
+/** Read the active team slug from the header-forwarding cookie. */
+const getActiveCookieTeam = (): string => {
+  const raw = document.cookie
+    .split('; ')
+    .find((r) => r.startsWith('mlflow_active_team='))
+    ?.substring('mlflow_active_team='.length) ?? '';
+  try { return decodeURIComponent(raw) || 'default'; } catch { return raw || 'default'; }
+};
+
+const TeamMembersSection = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading } = useTeamMembersQuery();
+  const addMember = useAddTeamMember();
+  const removeMember = useRemoveTeamMember();
+  const isGlobalAdmin = useCurrentUserIsAdmin();
+  const activeTeam = getActiveCookieTeam();
+
+  const [newUsername, setNewUsername] = useState('');
+  const [newRole, setNewRole] = useState<string>('member');
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const members = data?.members ?? [];
+
+  const handleAdd = async () => {
+    setAddError(null);
+    if (!newUsername.trim()) {
+      setAddError('Username is required');
+      return;
+    }
+    try {
+      await addMember.mutateAsync({ username: newUsername.trim(), role: newRole });
+      setNewUsername('');
+    } catch (e: unknown) {
+      setAddError(e instanceof Error ? e.message : 'Failed to add member');
+    }
+  };
+
+  const handleRemove = async (username: string) => {
+    try {
+      await removeMember.mutateAsync(username);
+    } catch {
+      // errors surface as query invalidation – user can retry
+    }
+  };
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+      <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.sm }}>
+        <Typography.Title level={4} withoutMargins>
+          <FormattedMessage defaultMessage="Team Members" description="Team members section title in admin users tab" />
+        </Typography.Title>
+        <Tag componentId="admin.team_members.active_team_tag" color="default">
+          {activeTeam}
+        </Tag>
+        {isGlobalAdmin && activeTeam === 'default' && (
+          <Typography.Hint>
+            <FormattedMessage
+              defaultMessage="Switch team in the sidebar to manage other teams"
+              description="Hint shown to global admin when on default team"
+            />
+          </Typography.Hint>
+        )}
+      </div>
+      {addError && (
+        <Alert
+          componentId="admin.team_members.add_error"
+          type="error"
+          message={addError}
+          closable
+          onClose={() => setAddError(null)}
+        />
+      )}
+      <div css={{ display: 'flex', gap: theme.spacing.sm, alignItems: 'flex-end' }}>
+        <Input
+          componentId="admin.team_members.username_input"
+          placeholder="Username"
+          value={newUsername}
+          onChange={(e) => setNewUsername(e.target.value)}
+          css={{ flex: 1 }}
+        />
+        <SimpleSelect
+          id="admin-team-members-role"
+          componentId="admin.team_members.role_select"
+          value={newRole}
+          onChange={({ target }) => setNewRole(target.value)}
+        >
+          {TEAM_ROLES.map((r) => (
+            <SimpleSelectOption key={r} value={r}>
+              {r}
+            </SimpleSelectOption>
+          ))}
+        </SimpleSelect>
+        <Button
+          componentId="admin.team_members.add_button"
+          type="primary"
+          loading={addMember.isLoading}
+          onClick={handleAdd}
+        >
+          <FormattedMessage defaultMessage="Add member" description="Button to add a team member" />
+        </Button>
+      </div>
+      {isLoading ? (
+        <Spinner size="small" />
+      ) : members.length === 0 ? (
+        <Typography.Text color="secondary">
+          <FormattedMessage defaultMessage="No members yet." description="Empty team members list" />
+        </Typography.Text>
+      ) : (
+        <Table scrollable noMinHeight css={{ border: `1px solid ${theme.colors.border}`, borderRadius: theme.general.borderRadiusBase, overflow: 'hidden' }}>
+          <TableRow isHeader>
+            <TableHeader componentId="admin.team_members.username_header" css={{ flex: 2 }}>
+              <FormattedMessage defaultMessage="Username" description="Team members table username header" />
+            </TableHeader>
+            <TableHeader componentId="admin.team_members.role_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Role" description="Team members table role header" />
+            </TableHeader>
+            <TableHeader componentId="admin.team_members.actions_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Actions" description="Team members table actions header" />
+            </TableHeader>
+          </TableRow>
+          {members.map((m) => (
+            <TableRow key={m.username}>
+              <TableCell css={{ flex: 2 }}>{m.username}</TableCell>
+              <TableCell css={{ flex: 1 }}>
+                {m.is_admin ? (
+                  <Tag componentId="admin.team_members.admin_tag" color="indigo">admin</Tag>
+                ) : (
+                  <Typography.Text>{m.role}</Typography.Text>
+                )}
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                <Button
+                  componentId="admin.team_members.remove_button"
+                  danger
+                  size="small"
+                  loading={removeMember.isLoading && removeMember.variables === m.username}
+                  onClick={() => handleRemove(m.username)}
+                >
+                  <FormattedMessage defaultMessage="Remove" description="Remove team member button" />
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </Table>
+      )}
+    </div>
+  );
+};
 
 const UsersTab = () => {
   const { theme } = useDesignSystemTheme();
@@ -137,8 +417,12 @@ const UsersTab = () => {
       />
     ) : null;
 
+  const isGlobalAdmin = Boolean(currentUserData?.user?.is_global_admin ?? currentUserData?.user?.is_admin);
+
   return (
     <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      {isGlobalAdmin && <GlobalAdminsSection />}
+      <TeamMembersSection />
       {error && (
         <Alert componentId="admin.users.error" type="error" message={error} closable onClose={() => setError(null)} />
       )}
@@ -492,6 +776,760 @@ const RolesTab = () => {
   );
 };
 
+const ProjectsTab = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading, error } = useExperimentsQuery();
+  const createExperiment = useCreateExperiment();
+  const deleteExperiment = useDeleteExperiment();
+  const renameExperiment = useRenameExperiment();
+  const isAdmin = useCurrentUserIsAdmin();
+
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [permissionsTarget, setPermissionsTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // Inline rename state: maps experimentId → draft name (undefined = not editing)
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  const startRename = (id: string, currentName: string) => {
+    setRenamingId(id);
+    setRenameValue(currentName);
+    setRenameError(null);
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameValue('');
+    setRenameError(null);
+  };
+
+  const commitRename = async (experimentId: string) => {
+    setRenameError(null);
+    if (!renameValue.trim()) {
+      setRenameError('Name cannot be empty');
+      return;
+    }
+    try {
+      await renameExperiment.mutateAsync({ experimentId, newName: renameValue.trim() });
+      setRenamingId(null);
+    } catch (e: unknown) {
+      setRenameError(e instanceof Error ? e.message : 'Failed to rename project');
+    }
+  };
+
+  const experiments = useMemo(
+    () => (data?.experiments ?? []).filter((e) => e.lifecycle_stage === 'active'),
+    [data],
+  );
+
+  const handleCreate = async () => {
+    setCreateError(null);
+    if (!newName.trim()) {
+      setCreateError('Project name cannot be empty');
+      return;
+    }
+    try {
+      await createExperiment.mutateAsync(newName.trim());
+      setNewName('');
+      setShowCreate(false);
+    } catch (e: unknown) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create project');
+    }
+  };
+
+  const handleDelete = async (experimentId: string) => {
+    setDeleteError(null);
+    try {
+      await deleteExperiment.mutateAsync(experimentId);
+    } catch (e: unknown) {
+      setDeleteError(e instanceof Error ? e.message : 'Failed to delete project');
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div
+        css={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: theme.spacing.sm,
+          padding: theme.spacing.lg,
+          minHeight: 200,
+        }}
+      >
+        <Spinner size="small" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert
+        componentId="admin.projects.query_error"
+        type="error"
+        message="Failed to load projects"
+        description={(error as Error)?.message || 'An error occurred while fetching projects.'}
+      />
+    );
+  }
+
+  const emptyState =
+    experiments.length === 0 ? (
+      <Empty
+        title={<FormattedMessage defaultMessage="No projects" description="Empty state title for projects table" />}
+        description={
+          <FormattedMessage
+            defaultMessage="Create a project to get started."
+            description="Empty state description for projects table"
+          />
+        }
+      />
+    ) : null;
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      {deleteError && (
+        <Alert
+          componentId="admin.projects.delete_error"
+          type="error"
+          message={deleteError}
+          closable
+          onClose={() => setDeleteError(null)}
+        />
+      )}
+      <div css={{ display: 'flex', justifyContent: 'flex-end' }}>
+        {isAdmin && (
+          <Button
+            componentId="admin.projects.create_button"
+            type="primary"
+            onClick={() => setShowCreate(true)}
+          >
+            <FormattedMessage defaultMessage="Create Project" description="Button to create a new project" />
+          </Button>
+        )}
+      </div>
+      <Table
+        scrollable
+        noMinHeight
+        empty={emptyState}
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="admin.projects.name_header" css={{ flex: 3 }}>
+            <FormattedMessage defaultMessage="Project name" description="Projects table name header" />
+          </TableHeader>
+          <TableHeader componentId="admin.projects.id_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="ID" description="Projects table experiment ID header" />
+          </TableHeader>
+          <TableHeader componentId="admin.projects.actions_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Actions" description="Projects table actions header" />
+          </TableHeader>
+        </TableRow>
+        {experiments.map((exp) => {
+          const isRenaming = renamingId === exp.experiment_id;
+          return (
+            <TableRow key={exp.experiment_id}>
+              {/* Name cell — inline editable */}
+              <TableCell css={{ flex: 3 }}>
+                {isRenaming ? (
+                  <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.xs }}>
+                    <div css={{ display: 'flex', gap: theme.spacing.xs, alignItems: 'center' }}>
+                      <Input
+                        componentId="admin.projects.rename_input"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitRename(exp.experiment_id);
+                          if (e.key === 'Escape') cancelRename();
+                        }}
+                        autoFocus
+                        css={{ flex: 1 }}
+                      />
+                      <Button
+                        componentId="admin.projects.rename_save"
+                        type="primary"
+                        size="small"
+                        loading={renameExperiment.isLoading}
+                        onClick={() => commitRename(exp.experiment_id)}
+                      >
+                        <FormattedMessage defaultMessage="Save" description="Save rename button" />
+                      </Button>
+                      <Button
+                        componentId="admin.projects.rename_cancel"
+                        type="tertiary"
+                        size="small"
+                        onClick={cancelRename}
+                      >
+                        <FormattedMessage defaultMessage="Cancel" description="Cancel rename button" />
+                      </Button>
+                    </div>
+                    {renameError && (
+                      <Alert
+                        componentId="admin.projects.rename_error"
+                        type="error"
+                        message={renameError}
+                        closable
+                        onClose={() => setRenameError(null)}
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <div css={{ display: 'flex', alignItems: 'center', gap: theme.spacing.xs }}>
+                    <Typography.Text>{exp.name}</Typography.Text>
+                    <Button
+                      componentId="admin.projects.rename_button"
+                      type="tertiary"
+                      size="small"
+                      onClick={() => startRename(exp.experiment_id, exp.name)}
+                      css={{ opacity: 0.5, '&:hover': { opacity: 1 } }}
+                    >
+                      <FormattedMessage defaultMessage="Rename" description="Rename project button" />
+                    </Button>
+                  </div>
+                )}
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                <Typography.Text color="secondary">{exp.experiment_id}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>
+                <div css={{ display: 'flex', gap: theme.spacing.xs }}>
+                  <Button
+                    componentId="admin.projects.permissions_button"
+                    type="tertiary"
+                    size="small"
+                    onClick={() => setPermissionsTarget({ id: exp.experiment_id, name: exp.name })}
+                  >
+                    <FormattedMessage defaultMessage="Manage access" description="Button to open project permissions" />
+                  </Button>
+                  {isAdmin && (
+                    <Button
+                      componentId="admin.projects.delete_button"
+                      type="tertiary"
+                      danger
+                      size="small"
+                      loading={deleteExperiment.isLoading}
+                      onClick={() => handleDelete(exp.experiment_id)}
+                    >
+                      <FormattedMessage defaultMessage="Delete" description="Delete project button" />
+                    </Button>
+                  )}
+                </div>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </Table>
+
+      {/* Create project modal */}
+      <Modal
+        componentId="admin.projects.create_modal"
+        title="Create project"
+        visible={showCreate}
+        onCancel={() => {
+          setShowCreate(false);
+          setNewName('');
+          setCreateError(null);
+        }}
+        onOk={handleCreate}
+        okText="Create"
+        confirmLoading={createExperiment.isLoading}
+      >
+        <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.sm }}>
+          {createError && (
+            <Alert
+              componentId="admin.projects.create_error"
+              type="error"
+              message={createError}
+              closable
+              onClose={() => setCreateError(null)}
+            />
+          )}
+          <Typography.Text bold>Project name</Typography.Text>
+          <Input
+            componentId="admin.projects.name_input"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+            placeholder="e.g. my-experiment"
+            autoFocus
+          />
+        </div>
+      </Modal>
+
+      {/* Permissions modal */}
+      {permissionsTarget && (
+        <ProjectPermissionsModal
+          open
+          onClose={() => setPermissionsTarget(null)}
+          experimentId={permissionsTarget.id}
+          experimentName={permissionsTarget.name}
+        />
+      )}
+    </div>
+  );
+};
+
+const TeamsTab = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading, error } = useTeamsQuery();
+  const createTeam = useCreateTeam();
+  const deleteTeam = useDeleteTeam();
+
+  const updateTeam = useUpdateTeam();
+
+  // create state
+  const [showCreate, setShowCreate] = useState(false);
+  const [newSlug, setNewSlug] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newStorageRoot, setNewStorageRoot] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // edit state
+  const [editTarget, setEditTarget] = useState<{ slug: string; name: string; storage_root?: string } | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editStorageRoot, setEditStorageRoot] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const openEdit = (team: { slug: string; name: string; storage_root?: string }) => {
+    setEditTarget(team);
+    setEditName(team.name);
+    setEditStorageRoot(team.storage_root ?? '');
+    setEditError(null);
+  };
+
+  const closeEdit = () => { setEditTarget(null); setEditError(null); };
+
+  const handleEdit = async () => {
+    if (!editTarget) return;
+    setEditError(null);
+    if (!editName.trim()) { setEditError('Name is required'); return; }
+    try {
+      await updateTeam.mutateAsync({
+        slug: editTarget.slug,
+        name: editName.trim(),
+        storage_root: editStorageRoot.trim() || undefined,
+      });
+      closeEdit();
+    } catch (e: unknown) {
+      setEditError(e instanceof Error ? e.message : 'Failed to update team');
+    }
+  };
+
+  const teams = useMemo(() => data?.tenants ?? [], [data]);
+
+  const handleCreate = async () => {
+    setCreateError(null);
+    if (!newSlug.trim() || !newName.trim()) {
+      setCreateError('Slug and name are required');
+      return;
+    }
+    if (!/^[a-z0-9-]+$/.test(newSlug.trim())) {
+      setCreateError('Slug must contain only lowercase letters, digits, and hyphens');
+      return;
+    }
+    try {
+      await createTeam.mutateAsync({
+        slug: newSlug.trim(),
+        name: newName.trim(),
+        storage_root: newStorageRoot.trim() || undefined,
+      });
+      setNewSlug(''); setNewName(''); setNewStorageRoot('');
+      setShowCreate(false);
+    } catch (e: unknown) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create team');
+    }
+  };
+
+  const handleDelete = async (slug: string) => {
+    setDeleteError(null);
+    try {
+      await deleteTeam.mutateAsync(slug);
+    } catch (e: unknown) {
+      setDeleteError(e instanceof Error ? e.message : `Failed to delete team '${slug}'`);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div css={{ display: 'flex', justifyContent: 'center', padding: theme.spacing.lg }}>
+        <Spinner size="small" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert
+        componentId="admin.teams.error"
+        type="error"
+        message="Failed to load teams"
+        description={(error as Error)?.message}
+      />
+    );
+  }
+
+  const emptyState =
+    teams.length === 0 ? (
+      <Empty
+        title={<FormattedMessage defaultMessage="No teams" description="Empty state for teams table" />}
+        description={
+          <FormattedMessage
+            defaultMessage="Create a team to get started."
+            description="Empty state description for teams table"
+          />
+        }
+      />
+    ) : null;
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      {deleteError && (
+        <Alert
+          componentId="admin.teams.delete_error"
+          type="error"
+          message={deleteError}
+          closable
+          onClose={() => setDeleteError(null)}
+        />
+      )}
+
+      <div css={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Button
+          componentId="admin.teams.create_button"
+          type="primary"
+          onClick={() => setShowCreate(true)}
+        >
+          <FormattedMessage defaultMessage="Create Team" description="Button to create a new team" />
+        </Button>
+      </div>
+
+      <Table
+        scrollable
+        noMinHeight
+        empty={emptyState}
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="admin.teams.name_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Name" description="Teams table name header" />
+          </TableHeader>
+          <TableHeader componentId="admin.teams.slug_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="Slug" description="Teams table slug header" />
+          </TableHeader>
+          <TableHeader componentId="admin.teams.storage_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Storage root" description="Teams table storage root header" />
+          </TableHeader>
+          <TableHeader componentId="admin.teams.actions_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="Actions" description="Teams table actions header" />
+          </TableHeader>
+        </TableRow>
+        {teams.map((team) => (
+          <TableRow key={team.slug}>
+            <TableCell css={{ flex: 2 }}>
+              <Typography.Text bold>{team.name}</Typography.Text>
+            </TableCell>
+            <TableCell css={{ flex: 1 }}>
+              <Tag componentId="admin.teams.slug_tag" color="default">
+                {team.slug}
+              </Tag>
+            </TableCell>
+            <TableCell css={{ flex: 2 }}>
+              <Typography.Text color="secondary">
+                {team.storage_root || '—'}
+              </Typography.Text>
+            </TableCell>
+            <TableCell css={{ flex: 1 }}>
+              <div css={{ display: 'flex', gap: theme.spacing.xs }}>
+                <Button
+                  componentId="admin.teams.edit_button"
+                  type="tertiary"
+                  size="small"
+                  onClick={() => openEdit(team)}
+                >
+                  <FormattedMessage defaultMessage="Edit" description="Edit team button" />
+                </Button>
+                {team.slug !== 'default' && (
+                  <Button
+                    componentId="admin.teams.delete_button"
+                    type="tertiary"
+                    danger
+                    size="small"
+                    loading={deleteTeam.isLoading}
+                    onClick={() => handleDelete(team.slug)}
+                  >
+                    <FormattedMessage defaultMessage="Delete" description="Delete team button" />
+                  </Button>
+                )}
+              </div>
+            </TableCell>
+          </TableRow>
+        ))}
+      </Table>
+
+      {/* Create team modal */}
+      <Modal
+        componentId="admin.teams.create_modal"
+        title="Create team"
+        visible={showCreate}
+        onCancel={() => { setShowCreate(false); setNewSlug(''); setNewName(''); setNewStorageRoot(''); setCreateError(null); }}
+        onOk={handleCreate}
+        okText="Create"
+        confirmLoading={createTeam.isLoading}
+      >
+        <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+          {createError && (
+            <Alert
+              componentId="admin.teams.create_error"
+              type="error"
+              message={createError}
+              closable
+              onClose={() => setCreateError(null)}
+            />
+          )}
+          <div>
+            <Typography.Text bold>Team name</Typography.Text>
+            <Input
+              componentId="admin.teams.name_input"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="e.g. Data Science"
+              autoFocus
+            />
+          </div>
+          <div>
+            <Typography.Text bold>Slug</Typography.Text>
+            <Typography.Hint>URL-safe identifier — lowercase, digits, hyphens only</Typography.Hint>
+            <Input
+              componentId="admin.teams.slug_input"
+              value={newSlug}
+              onChange={(e) => setNewSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
+              placeholder="e.g. data-science"
+            />
+          </div>
+          <div>
+            <Typography.Text bold>Artifact storage root <Typography.Text color="secondary">(optional)</Typography.Text></Typography.Text>
+            <Typography.Hint>Base path for experiment artifacts, e.g. /eagle/datascience/mlflow</Typography.Hint>
+            <Input
+              componentId="admin.teams.storage_input"
+              value={newStorageRoot}
+              onChange={(e) => setNewStorageRoot(e.target.value)}
+              placeholder="e.g. /eagle/datascience/mlflow"
+            />
+          </div>
+        </div>
+      </Modal>
+
+      {/* Edit team modal */}
+      {editTarget && (
+        <Modal
+          componentId="admin.teams.edit_modal"
+          title={`Edit team — ${editTarget.slug}`}
+          visible
+          onCancel={closeEdit}
+          onOk={handleEdit}
+          okText="Save"
+          confirmLoading={updateTeam.isLoading}
+        >
+          <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+            {editError && (
+              <Alert
+                componentId="admin.teams.edit_error"
+                type="error"
+                message={editError}
+                closable
+                onClose={() => setEditError(null)}
+              />
+            )}
+            <div>
+              <Typography.Text bold>Team name</Typography.Text>
+              <Input
+                componentId="admin.teams.edit_name_input"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleEdit()}
+                autoFocus
+              />
+            </div>
+            <div>
+              <Typography.Text bold>
+                Slug <Typography.Text color="secondary">(read-only)</Typography.Text>
+              </Typography.Text>
+              <Input
+                componentId="admin.teams.edit_slug_input"
+                value={editTarget.slug}
+                disabled
+              />
+            </div>
+            <div>
+              <Typography.Text bold>
+                Artifact storage root{' '}
+                <Typography.Text color="secondary">(optional)</Typography.Text>
+              </Typography.Text>
+              <Typography.Hint>Base path for experiment artifacts</Typography.Hint>
+              <Input
+                componentId="admin.teams.edit_storage_input"
+                value={editStorageRoot}
+                onChange={(e) => setEditStorageRoot(e.target.value)}
+                placeholder="e.g. /eagle/datascience/mlflow"
+              />
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+};
+
+const ModelsTab = () => {
+  const { theme } = useDesignSystemTheme();
+  const { data, isLoading, error } = useRegisteredModelsQuery();
+  const setVisibility = useSetModelVisibility();
+  const isAdmin = useCurrentUserIsAdmin();
+
+  const models = useMemo(() => (data as any)?.models ?? [], [data]);
+
+  const handleToggle = async (name: string, current: string) => {
+    const next = current === 'public' ? 'team' : 'public';
+    await setVisibility.mutateAsync({ name, visibility: next as 'team' | 'public' });
+  };
+
+  if (isLoading) {
+    return (
+      <div css={{ display: 'flex', justifyContent: 'center', padding: theme.spacing.lg }}>
+        <Spinner size="small" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <Alert
+        componentId="admin.models.error"
+        type="error"
+        message="Failed to load models"
+        description={(error as Error)?.message}
+      />
+    );
+  }
+
+  const emptyState =
+    models.length === 0 ? (
+      <Empty
+        title={<FormattedMessage defaultMessage="No registered models" description="Empty state for models table" />}
+        description={
+          <FormattedMessage
+            defaultMessage="Register a model from a training run to see it here."
+            description="Empty state description for models table"
+          />
+        }
+      />
+    ) : null;
+
+  return (
+    <div css={{ display: 'flex', flexDirection: 'column', gap: theme.spacing.md }}>
+      <div
+        css={{
+          padding: theme.spacing.sm,
+          backgroundColor: theme.colors.backgroundSecondary,
+          borderRadius: theme.general.borderRadiusBase,
+        }}
+      >
+        <Typography.Hint>
+          <FormattedMessage
+            defaultMessage="Public models are readable by any authenticated user across all teams. Team-private models are visible only to members of the owning team."
+            description="Model visibility explanation"
+          />
+        </Typography.Hint>
+      </div>
+      <Table
+        scrollable
+        noMinHeight
+        empty={emptyState}
+        css={{
+          border: `1px solid ${theme.colors.border}`,
+          borderRadius: theme.general.borderRadiusBase,
+          overflow: 'hidden',
+        }}
+      >
+        <TableRow isHeader>
+          <TableHeader componentId="admin.models.name_header" css={{ flex: 3 }}>
+            <FormattedMessage defaultMessage="Model name" description="Models table name header" />
+          </TableHeader>
+          <TableHeader componentId="admin.models.versions_header" css={{ flex: 1 }}>
+            <FormattedMessage defaultMessage="Versions" description="Models table versions header" />
+          </TableHeader>
+          <TableHeader componentId="admin.models.visibility_header" css={{ flex: 2 }}>
+            <FormattedMessage defaultMessage="Visibility" description="Models table visibility header" />
+          </TableHeader>
+          {isAdmin && (
+            <TableHeader componentId="admin.models.actions_header" css={{ flex: 1 }}>
+              <FormattedMessage defaultMessage="Actions" description="Models table actions header" />
+            </TableHeader>
+          )}
+        </TableRow>
+        {models.map((model: { name: string; visibility?: string; version_count?: number; tenant?: string }) => {
+          const visibility = model.visibility ?? 'team';
+          const isPublic = visibility === 'public';
+          return (
+            <TableRow key={model.name}>
+              <TableCell css={{ flex: 3 }}>
+                <Typography.Text bold>{model.name}</Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 1 }}>
+                <Typography.Text color="secondary">
+                  {model.version_count ?? 0}
+                </Typography.Text>
+              </TableCell>
+              <TableCell css={{ flex: 2 }}>
+                <Tag
+                  componentId="admin.models.visibility_tag"
+                  color={isPublic ? 'turquoise' : 'default'}
+                >
+                  {isPublic ? (
+                    <FormattedMessage defaultMessage="Public 🌐" description="Public model visibility tag" />
+                  ) : (
+                    <FormattedMessage defaultMessage="Team only 🔒" description="Team-private model visibility tag" />
+                  )}
+                </Tag>
+              </TableCell>
+              {isAdmin && (
+                <TableCell css={{ flex: 1 }}>
+                  <Button
+                    componentId="admin.models.toggle_visibility"
+                    type="tertiary"
+                    size="small"
+                    loading={setVisibility.isLoading}
+                    onClick={() => handleToggle(model.name, visibility)}
+                  >
+                    {isPublic ? (
+                      <FormattedMessage defaultMessage="Make private" description="Make model team-private button" />
+                    ) : (
+                      <FormattedMessage defaultMessage="Make public" description="Make model public button" />
+                    )}
+                  </Button>
+                </TableCell>
+              )}
+            </TableRow>
+          );
+        })}
+      </Table>
+    </div>
+  );
+};
+
 const AdminPage = () => {
   const { theme } = useDesignSystemTheme();
   // Reflect the active tab in the URL (?tab=users|roles) so deep links — e.g.
@@ -499,7 +1537,12 @@ const AdminPage = () => {
   // expected tab and a refresh preserves it.
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
-  const activeTab = tabFromUrl === 'roles' ? 'roles' : 'users';
+  const activeTab =
+    tabFromUrl === 'roles' ? 'roles'
+    : tabFromUrl === 'projects' ? 'projects'
+    : tabFromUrl === 'models' ? 'models'
+    : tabFromUrl === 'teams' ? 'teams'
+    : 'users';
 
   const activeWorkspace = useActiveWorkspace();
   // Mode is path-driven, not role-driven: ``/admin`` is the cross-workspace
@@ -579,12 +1622,30 @@ const AdminPage = () => {
             <Tabs.Trigger value="users">
               <FormattedMessage defaultMessage="Users" description="Admin users tab" />
             </Tabs.Trigger>
+            <Tabs.Trigger value="teams">
+              <FormattedMessage defaultMessage="Teams" description="Admin teams tab" />
+            </Tabs.Trigger>
+            <Tabs.Trigger value="projects">
+              <FormattedMessage defaultMessage="Projects" description="Admin projects tab" />
+            </Tabs.Trigger>
+            <Tabs.Trigger value="models">
+              <FormattedMessage defaultMessage="Models" description="Admin models tab" />
+            </Tabs.Trigger>
             <Tabs.Trigger value="roles">
               <FormattedMessage defaultMessage="Roles" description="Admin roles tab" />
             </Tabs.Trigger>
           </Tabs.List>
           <Tabs.Content value="users" css={{ paddingTop: theme.spacing.md }}>
             <UsersTab />
+          </Tabs.Content>
+          <Tabs.Content value="teams" css={{ paddingTop: theme.spacing.md }}>
+            <TeamsTab />
+          </Tabs.Content>
+          <Tabs.Content value="projects" css={{ paddingTop: theme.spacing.md }}>
+            <ProjectsTab />
+          </Tabs.Content>
+          <Tabs.Content value="models" css={{ paddingTop: theme.spacing.md }}>
+            <ModelsTab />
           </Tabs.Content>
           <Tabs.Content value="roles" css={{ paddingTop: theme.spacing.md }}>
             <RolesTab />

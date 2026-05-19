@@ -26,6 +26,8 @@ import { getRouteDefs as getCommonRouteDefs } from './common/route-defs';
 import { getGatewayRouteDefs } from './gateway/route-defs';
 import { getAccountRouteDefs } from './account/route-defs';
 import { getAdminRouteDefs } from './admin/route-defs';
+import { AccountRoutePaths } from './account/routes';
+const LazySSOCompletePage = React.lazy(() => import('./account/SSOCompletePage'));
 import { DEV_USER_SWITCHER_ENABLED } from './admin/DevUserSwitcher';
 import { useInitializeExperimentRunColors } from './experiment-tracking/components/experiment-page/hooks/useExperimentRunColor';
 import { MlflowSidebar } from './common/components/MlflowSidebar';
@@ -233,6 +235,8 @@ export const MlflowRouter = () => {
     [],
   );
 
+  const LazyLoginPage = React.lazy(() => import('./account/LoginPage'));
+
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const hashRouter = useMemo(
     () =>
@@ -241,11 +245,30 @@ export const MlflowRouter = () => {
         ? null
         : createHashRouter([
             {
+              // Login page renders without the sidebar layout.
+              path: AccountRoutePaths.loginPage,
+              element: (
+                <React.Suspense fallback={<LegacySkeleton />}>
+                  <LazyLoginPage />
+                </React.Suspense>
+              ),
+            },
+            {
+              // SSO completion page — set cookies via JS after OAuth callback.
+              path: '/sso-complete',
+              element: (
+                <React.Suspense fallback={<LegacySkeleton />}>
+                  <LazySSOCompletePage />
+                </React.Suspense>
+              ),
+            },
+            {
               path: '/',
               element: <WorkspaceAwareRootRoute workspacesEnabled={workspacesEnabled} />,
               children: routes,
             },
           ]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [routes, workspacesEnabled, featuresLoading],
   );
 

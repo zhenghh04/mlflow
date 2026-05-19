@@ -19,9 +19,12 @@ from mlflow.server.auth.db import utils as dbutils
 from mlflow.server.auth.db.models import (
     SqlRole,
     SqlRolePermission,
+    SqlTeamMembership,
+    SqlTenant,
     SqlUser,
     SqlUserRoleAssignment,
 )
+from mlflow.tenant_context import DEFAULT_TENANT_SLUG, get_active_tenant_slug
 from mlflow.server.auth.entities import (
     ExperimentPermission,
     GatewayEndpointPermission,
@@ -31,6 +34,8 @@ from mlflow.server.auth.entities import (
     Role,
     RolePermission,
     ScorerPermission,
+    TeamMembership,
+    Tenant,
     User,
     UserRoleAssignment,
     WorkspacePermission,
@@ -133,6 +138,229 @@ class SqlAlchemyStore:
             SessionMaker = sessionmaker(bind=self.engine)
             self.ManagedSessionMaker = _get_managed_session_maker(SessionMaker, self.db_type)
 
+    # ------------------------------------------------------------------
+    # Tenant CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_tenant_by_slug(session, slug: str) -> SqlTenant:
+        try:
+            return session.query(SqlTenant).filter(SqlTenant.slug == slug).one()
+        except NoResultFound:
+            raise MlflowException(
+                f"Tenant with slug={slug!r} not found",
+                RESOURCE_DOES_NOT_EXIST,
+            )
+
+    def create_tenant(
+        self,
+        slug: str,
+        name: str,
+        storage_root: str | None = None,
+        max_experiments: int | None = None,
+        max_users: int | None = None,
+    ) -> Tenant:
+        if not slug or not name:
+            raise MlflowException.invalid_parameter_value(
+                "slug and name are required to create a tenant."
+            )
+        with self.ManagedSessionMaker(read_only=False) as session:
+            try:
+                tenant = SqlTenant(
+                    slug=slug,
+                    name=name,
+                    storage_root=storage_root,
+                    max_experiments=max_experiments,
+                    max_users=max_users,
+                )
+                session.add(tenant)
+                session.flush()
+                return tenant.to_mlflow_entity()
+            except IntegrityError as e:
+                raise MlflowException(
+                    f"Tenant with slug={slug!r} already exists. Error: {e}",
+                    RESOURCE_ALREADY_EXISTS,
+                ) from e
+
+    def get_tenant(self, slug: str) -> Tenant:
+        with self.ManagedSessionMaker() as session:
+            return self._get_tenant_by_slug(session, slug).to_mlflow_entity()
+
+    def list_tenants(self) -> list[Tenant]:
+        with self.ManagedSessionMaker() as session:
+            return [t.to_mlflow_entity() for t in session.query(SqlTenant).all()]
+
+    def update_tenant(
+        self,
+        slug: str,
+        name: str | None = None,
+        storage_root: str | None = None,
+        max_experiments: int | None = None,
+        max_users: int | None = None,
+    ) -> Tenant:
+        with self.ManagedSessionMaker(read_only=False) as session:
+            tenant = self._get_tenant_by_slug(session, slug)
+            if name is not None:
+                tenant.name = name
+            if storage_root is not None:
+                tenant.storage_root = storage_root
+            if max_experiments is not None:
+                tenant.max_experiments = max_experiments
+            if max_users is not None:
+                tenant.max_users = max_users
+            session.flush()
+            return tenant.to_mlflow_entity()
+
+    def delete_tenant(self, slug: str) -> None:
+        if slug == DEFAULT_TENANT_SLUG:
+            raise MlflowException.invalid_parameter_value(
+                "The default tenant cannot be deleted."
+            )
+        with self.ManagedSessionMaker(read_only=False) as session:
+            tenant = self._get_tenant_by_slug(session, slug)
+            session.delete(tenant)
+
+    def get_or_create_default_tenant(self) -> Tenant:
+        with self.ManagedSessionMaker() as session:
+            tenant = session.query(SqlTenant).filter(
+                SqlTenant.slug == DEFAULT_TENANT_SLUG
+            ).first()
+            if tenant is not None:
+                return tenant.to_mlflow_entity()
+        return self.create_tenant(slug=DEFAULT_TENANT_SLUG, name="Default Tenant")
+
+    # ------------------------------------------------------------------
+    # Tenant-aware helpers used by user/role mutations
+    # ------------------------------------------------------------------
+
+    def _get_active_tenant_id(self, session) -> int:
+        slug = get_active_tenant_slug()
+        return self._get_tenant_by_slug(session, slug).id
+
+    # ------------------------------------------------------------------
+    # Team membership helpers
+    # ------------------------------------------------------------------
+
+    def _get_membership(self, session, user_id: int, tenant_id: int) -> SqlTeamMembership | None:
+        return (
+            session.query(SqlTeamMembership)
+            .filter(
+                SqlTeamMembership.user_id == user_id,
+                SqlTeamMembership.tenant_id == tenant_id,
+            )
+            .first()
+        )
+
+    def is_team_member(self, username: str, tenant_slug: str | None = None) -> bool:
+        """Return True if username is a member of tenant_slug (or the active tenant)."""
+        with self.ManagedSessionMaker() as session:
+            user = self._get_user_global(session, username)
+            if user is None:
+                return False
+            if user.is_admin:
+                return True
+            slug = tenant_slug or get_active_tenant_slug()
+            if slug == DEFAULT_TENANT_SLUG:
+                return True
+            try:
+                tenant = self._get_tenant_by_slug(session, slug)
+            except MlflowException:
+                return False
+            return self._get_membership(session, user.id, tenant.id) is not None
+
+    def get_team_role(self, username: str, tenant_slug: str | None = None) -> str | None:
+        """Return the user's role in the team ('admin' | 'member'), or None if not a member."""
+        with self.ManagedSessionMaker() as session:
+            user = self._get_user_global(session, username)
+            if user is None:
+                return None
+            if user.is_admin:
+                return "admin"
+            slug = tenant_slug or get_active_tenant_slug()
+            if slug == DEFAULT_TENANT_SLUG:
+                return "member"
+            try:
+                tenant = self._get_tenant_by_slug(session, slug)
+            except MlflowException:
+                return None
+            m = self._get_membership(session, user.id, tenant.id)
+            return m.role if m else None
+
+    def is_team_admin(self, username: str, tenant_slug: str | None = None) -> bool:
+        return self.get_team_role(username, tenant_slug) == "admin"
+
+    def add_team_member(self, username: str, role: str = "member") -> TeamMembership:
+        """Add username to the active team. Updates role if already a member."""
+        with self.ManagedSessionMaker(read_only=False) as session:
+            user = self._get_user_global(session, username)
+            if user is None:
+                raise MlflowException(
+                    f"User with username={username} not found", RESOURCE_DOES_NOT_EXIST
+                )
+            tenant_id = self._get_active_tenant_id(session)
+            existing = self._get_membership(session, user.id, tenant_id)
+            if existing is not None:
+                existing.role = role
+                session.flush()
+                return existing.to_mlflow_entity()
+            m = SqlTeamMembership(user_id=user.id, tenant_id=tenant_id, role=role)
+            session.add(m)
+            session.flush()
+            return m.to_mlflow_entity()
+
+    def remove_team_member(self, username: str) -> None:
+        """Remove username from the active team."""
+        with self.ManagedSessionMaker(read_only=False) as session:
+            user = self._get_user_global(session, username)
+            if user is None:
+                raise MlflowException(
+                    f"User with username={username} not found", RESOURCE_DOES_NOT_EXIST
+                )
+            tenant_id = self._get_active_tenant_id(session)
+            m = self._get_membership(session, user.id, tenant_id)
+            if m is None:
+                raise MlflowException(
+                    f"User {username!r} is not a member of this team", RESOURCE_DOES_NOT_EXIST
+                )
+            session.delete(m)
+
+    def list_team_members(self) -> list[tuple[User, str]]:
+        """Return (User, role) pairs for all members of the active tenant."""
+        with self.ManagedSessionMaker() as session:
+            tenant_id = self._get_active_tenant_id(session)
+            rows = (
+                session.query(SqlUser, SqlTeamMembership.role)
+                .join(SqlTeamMembership, SqlUser.id == SqlTeamMembership.user_id)
+                .filter(SqlTeamMembership.tenant_id == tenant_id)
+                .all()
+            )
+            return [(u.to_mlflow_entity(), role) for u, role in rows]
+
+    def get_user_teams(self, username: str) -> list[tuple[Tenant, str]]:
+        """Return (Tenant, role) pairs for every team username belongs to.
+
+        Global admins (is_admin=True) can access all tenants, so we return
+        every tenant with role='admin' so the team switcher lists them all.
+        """
+        with self.ManagedSessionMaker() as session:
+            user = self._get_user_global(session, username)
+            if user is None:
+                return []
+            if user.is_admin:
+                tenants = session.query(SqlTenant).all()
+                return [(t.to_mlflow_entity(), "admin") for t in tenants]
+            rows = (
+                session.query(SqlTenant, SqlTeamMembership.role)
+                .join(SqlTeamMembership, SqlTenant.id == SqlTeamMembership.tenant_id)
+                .filter(SqlTeamMembership.user_id == user.id)
+                .all()
+            )
+            return [(t.to_mlflow_entity(), role) for t, role in rows]
+
+    # ------------------------------------------------------------------
+    # User CRUD — users are global, membership is separate
+    # ------------------------------------------------------------------
+
     def authenticate_user(self, username: str, password: str) -> bool:
         with self.ManagedSessionMaker() as session:
             try:
@@ -141,15 +369,72 @@ class SqlAlchemyStore:
             except MlflowException:
                 return False
 
-    def create_user(self, username: str, password: str, is_admin: bool = False) -> User:
+    def _ensure_home_tenant(self, session, user: SqlUser) -> None:
+        """Create a private home tenant for ``user`` if it doesn't exist yet.
+
+        The home tenant slug equals the username.  The user is the sole admin
+        so they have full control; no one else has access by default.
+        Layout mirrors an HPC home directory — private by default, sharable
+        on request.
+        """
+        slug = user.username
+        existing = session.query(SqlTenant).filter(SqlTenant.slug == slug).first()
+        if existing is None:
+            home = SqlTenant(slug=slug, name=f"{user.username}'s workspace")
+            session.add(home)
+            session.flush()  # assign home.id
+            session.add(SqlTeamMembership(user_id=user.id, tenant_id=home.id, role="admin"))
+            session.flush()
+        else:
+            # Tenant exists — ensure membership
+            m = self._get_membership(session, user.id, existing.id)
+            if m is None:
+                session.add(SqlTeamMembership(user_id=user.id, tenant_id=existing.id, role="admin"))
+                session.flush()
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        is_admin: bool = False,
+        role: str = "member",
+    ) -> User:
+        """Create a global user account and enroll them in the active team.
+
+        ``is_admin=True`` sets the global system-superuser flag (reserved for
+        the bootstrap admin account; regular project admins use ``role='admin'``).
+
+        If the username already exists globally the team membership is added or
+        updated without touching the password.
+        """
         _validate_username(username)
         _validate_password(password)
-        pwhash = generate_password_hash(password)
         with self.ManagedSessionMaker(read_only=False) as session:
+            existing = self._get_user_global(session, username)
+            tenant_id = self._get_active_tenant_id(session)
+            if existing is not None:
+                m = self._get_membership(session, existing.id, tenant_id)
+                if m is None:
+                    session.add(SqlTeamMembership(user_id=existing.id, tenant_id=tenant_id, role=role))
+                    session.flush()
+                # Ensure the user always has a home tenant
+                if not existing.is_admin:
+                    self._ensure_home_tenant(session, existing)
+                return existing.to_mlflow_entity()
+            pwhash = generate_password_hash(password)
             try:
                 user = SqlUser(username=username, password_hash=pwhash, is_admin=is_admin)
                 session.add(user)
                 session.flush()
+                # System-admin accounts in the default tenant don't need a
+                # membership row — is_admin=True grants cross-tenant access.
+                from mlflow.tenant_context import DEFAULT_TENANT_SLUG as _DS
+                if not (is_admin and get_active_tenant_slug() == _DS):
+                    session.add(SqlTeamMembership(user_id=user.id, tenant_id=tenant_id, role=role))
+                    session.flush()
+                # Every non-admin user gets a private home tenant named after them
+                if not is_admin:
+                    self._ensure_home_tenant(session, user)
                 return user.to_mlflow_entity()
             except IntegrityError as e:
                 raise MlflowException(
@@ -158,43 +443,54 @@ class SqlAlchemyStore:
                 ) from e
 
     @staticmethod
-    def _get_user(session, username: str) -> SqlUser:
-        try:
-            return session.query(SqlUser).filter(SqlUser.username == username).one()
-        except NoResultFound:
+    def _get_user_global(session, username: str) -> SqlUser | None:
+        """Look up a user by username globally, no tenant filter."""
+        return session.query(SqlUser).filter(SqlUser.username == username).first()
+
+    def _get_user(self, session, username: str) -> SqlUser:
+        """Look up a user globally, raising MlflowException if not found."""
+        user = self._get_user_global(session, username)
+        if user is None:
             raise MlflowException(
                 f"User with username={username} not found",
                 RESOURCE_DOES_NOT_EXIST,
             )
-        except MultipleResultsFound:
-            raise MlflowException(
-                f"Found multiple users with username={username}",
-                INVALID_STATE,
-            )
+        return user
 
     def has_user(self, username: str) -> bool:
+        """True if the username exists globally (not team-scoped)."""
         with self.ManagedSessionMaker() as session:
-            return session.query(SqlUser).filter(SqlUser.username == username).first() is not None
+            return self._get_user_global(session, username) is not None
 
     def get_user(self, username: str) -> User:
         with self.ManagedSessionMaker() as session:
             return self._get_user(session, username).to_mlflow_entity()
 
     def list_users(self) -> list[User]:
+        """List users who are members of the active team."""
         with self.ManagedSessionMaker() as session:
-            users = session.query(SqlUser).all()
+            tenant_id = self._get_active_tenant_id(session)
+            users = (
+                session.query(SqlUser)
+                .join(SqlTeamMembership, SqlUser.id == SqlTeamMembership.user_id)
+                .filter(SqlTeamMembership.tenant_id == tenant_id)
+                .all()
+            )
             return [u.to_mlflow_entity() for u in users]
 
     def list_users_with_roles(self) -> list[tuple[User, list[Role]]]:
         """
-        Return every user paired with their role assignments. Eager-loads
-        assignments / roles / role-permissions in batched queries so the admin
-        Users tab can render per-user role info without N per-row requests.
+        Return every member of the active team paired with their role assignments.
+        Eager-loads assignments / roles / role-permissions in batched queries so the
+        admin Users tab can render per-user role info without N per-row requests.
         """
         with self.ManagedSessionMaker() as session:
+            tenant_id = self._get_active_tenant_id(session)
             users = (
                 session
                 .query(SqlUser)
+                .join(SqlTeamMembership, SqlUser.id == SqlTeamMembership.user_id)
+                .filter(SqlTeamMembership.tenant_id == tenant_id)
                 .options(
                     selectinload(SqlUser.user_role_assignments)
                     .selectinload(SqlUserRoleAssignment.role)
@@ -207,38 +503,98 @@ class SqlAlchemyStore:
                 for u in users
             ]
 
+    def update_profile(
+        self,
+        username: str,
+        display_name: str | None = None,
+        email: str | None = None,
+        title: str | None = None,
+        department: str | None = None,
+        location: str | None = None,
+        bio: str | None = None,
+        github: str | None = None,
+        orcid: str | None = None,
+        avatar_url: str | None = None,
+    ) -> User:
+        _PROFILE = ("display_name", "email", "title", "department",
+                    "location", "bio", "github", "orcid", "avatar_url")
+        kwargs = {k: v for k, v in {
+            "display_name": display_name, "email": email, "title": title,
+            "department": department, "location": location, "bio": bio,
+            "github": github, "orcid": orcid, "avatar_url": avatar_url,
+        }.items() if v is not None}
+        with self.ManagedSessionMaker(read_only=False) as session:
+            user = self._get_user(session, username)
+            for field, value in kwargs.items():
+                if field in _PROFILE:
+                    setattr(user, field, value)
+            session.flush()
+            return user.to_mlflow_entity()
+
+    def get_user_profile(self, username: str) -> dict:
+        """Return user info + teams with roles for the profile page."""
+        with self.ManagedSessionMaker() as session:
+            sql_user = self._get_user(session, username)
+            profile = sql_user.to_mlflow_entity().to_json()
+            teams = (
+                session.query(SqlTenant, SqlTeamMembership.role)
+                .join(SqlTeamMembership, SqlTenant.id == SqlTeamMembership.tenant_id)
+                .filter(SqlTeamMembership.user_id == sql_user.id)
+                .all()
+            )
+            profile["teams"] = [
+                {"slug": t.slug, "name": t.name, "role": role}
+                for t, role in teams
+            ]
+            return profile
+
     def update_user(
         self, username: str, password: str | None = None, is_admin: bool | None = None
     ) -> User:
         with self.ManagedSessionMaker(read_only=False) as session:
             user = self._get_user(session, username)
             if password is not None:
-                pwhash = generate_password_hash(password)
-                user.password_hash = pwhash
+                user.password_hash = generate_password_hash(password)
             if is_admin is not None:
-                user.is_admin = is_admin
+                # For the system admin account: update the global flag.
+                # For regular users: update their role in the active team.
+                if user.is_admin or get_active_tenant_slug() == DEFAULT_TENANT_SLUG:
+                    user.is_admin = is_admin
+                else:
+                    tenant_id = self._get_active_tenant_id(session)
+                    m = self._get_membership(session, user.id, tenant_id)
+                    if m is not None:
+                        m.role = "admin" if is_admin else "member"
+            session.flush()
             return user.to_mlflow_entity()
 
     def delete_user(self, username: str):
+        """Remove the user from the active team (removes their membership).
+        The global account is deleted only if they have no other team memberships.
+        """
         with self.ManagedSessionMaker(read_only=False) as session:
             user = self._get_user(session, username)
-            # The user's per-resource grants live as role_permissions rows under a
-            # synthetic `__user_<id>__` role. Delete those first so their assignments
-            # and permissions don't block the user-row delete on strict FK backends.
-            synthetic_name = self._synthetic_user_role_name(user.id)
-            for role in session.query(SqlRole).filter(SqlRole.name == synthetic_name).all():
-                session.delete(role)
-            # Scrub the user's rows from the retained legacy permission tables.
-            # See ``_RETAINED_LEGACY_PERMISSION_TABLES`` (top of module) for why
-            # this loop exists and the steps to retire it once the drop migration
-            # ships. When that constant is empty, this is a no-op.
-            for table in _RETAINED_LEGACY_PERMISSION_TABLES:
-                session.execute(
-                    text(f"DELETE FROM {table} WHERE user_id = :uid"),
-                    {"uid": user.id},
-                )
-            session.flush()
-            session.delete(user)
+            tenant_id = self._get_active_tenant_id(session)
+            # Remove membership from this team.
+            m = self._get_membership(session, user.id, tenant_id)
+            if m is not None:
+                session.delete(m)
+                session.flush()
+            # Check remaining memberships — delete global account only if orphaned.
+            remaining = session.query(SqlTeamMembership).filter(
+                SqlTeamMembership.user_id == user.id
+            ).count()
+            if remaining == 0 and not user.is_admin:
+                synthetic_name = self._synthetic_user_role_name(user.id)
+                for role in session.query(SqlRole).filter(SqlRole.name == synthetic_name).all():
+                    session.delete(role)
+                for table in _RETAINED_LEGACY_PERMISSION_TABLES:
+                    session.execute(
+                        text(f"DELETE FROM {table} WHERE user_id = :uid"),
+                        {"uid": user.id},
+                    )
+                session.flush()
+                session.delete(user)
 
     # ---- Synthetic user-role helpers ----
     #
@@ -283,27 +639,41 @@ class SqlAlchemyStore:
         # scope and we can recover by re-querying the winner's row. Same pattern for
         # the user->role assignment.
         name = self._synthetic_user_role_name(user_id)
+        tenant_id = self._get_active_tenant_id(session)
         role = (
             session
             .query(SqlRole)
-            .filter(SqlRole.workspace == workspace, SqlRole.name == name)
+            .filter(
+                SqlRole.workspace == workspace,
+                SqlRole.name == name,
+                SqlRole.tenant_id == tenant_id,
+            )
             .first()
         )
         if role is None:
             try:
                 with session.begin_nested():
-                    role = SqlRole(name=name, workspace=workspace, description=None)
+                    role = SqlRole(
+                        name=name,
+                        workspace=workspace,
+                        description=None,
+                        tenant_id=tenant_id,
+                    )
                     session.add(role)
                     session.flush()
             except IntegrityError:
                 # No other-assignee check needed here: the SAVEPOINT only
                 # rolls back when our own INSERT lost the race for the same
-                # ``(workspace, __user_<user_id>__)`` tuple, so the recovered
-                # row is guaranteed to be this user's synthetic role.
+                # ``(tenant_id, workspace, __user_<user_id>__)`` tuple, so the
+                # recovered row is guaranteed to be this user's synthetic role.
                 role = (
                     session
                     .query(SqlRole)
-                    .filter(SqlRole.workspace == workspace, SqlRole.name == name)
+                    .filter(
+                        SqlRole.workspace == workspace,
+                        SqlRole.name == name,
+                        SqlRole.tenant_id == tenant_id,
+                    )
                     .one()
                 )
         else:

@@ -5,12 +5,25 @@ import { isWorkspaceAdminRole } from './types';
 import type { UpdatePasswordRequest } from './types';
 
 export const useCurrentUserQuery = () => {
-  return useQuery({
+  const result = useQuery({
     queryKey: ['account_current_user'],
     queryFn: AccountApi.getCurrentUser,
     retry: false,
     refetchOnWindowFocus: false,
   });
+
+  // When not authenticated (error + no cached user data), redirect to /#/login
+  // so the user sees our styled form instead of the browser's native dialog.
+  useEffect(() => {
+    if (result.isError && !result.data) {
+      const loginHash = '#/login';
+      if (!window.location.hash.startsWith(loginHash)) {
+        window.location.hash = loginHash;
+      }
+    }
+  }, [result.isError, result.data]);
+
+  return result;
 };
 
 export const useCurrentUserIsAdmin = () => {

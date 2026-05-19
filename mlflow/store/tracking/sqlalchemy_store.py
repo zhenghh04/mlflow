@@ -27,6 +27,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Select, Subquery
 
 from mlflow.utils.crypto import KEKManager, _decrypt_secret
+from mlflow.tenant_context import get_active_tenant_slug
 
 _SqlAlchemyStatement = TypeVar("_SqlAlchemyStatement", Select, Query)
 
@@ -447,14 +448,14 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
                     error_code=INVALID_STATE,
                 )
 
-        try:
-            self.get_experiment(str(self.DEFAULT_EXPERIMENT_ID))
-        except MlflowException as exc:
-            if exc.error_code and exc.error_code != ErrorCode.Name(RESOURCE_DOES_NOT_EXIST):
-                raise
-            # Default experiment doesn't exist, create it
-            with self.ManagedSessionMaker(read_only=False) as session:
-                self._create_default_experiment(session)
+        # Check for the default experiment (id=0) globally across all tenants.
+        # We bypass _experiment_where_clauses() intentionally here because
+        # experiment_id=0 is a shared system experiment — it must exist once in
+        # the DB regardless of which tenant the current request belongs to.
+        with self.ManagedSessionMaker() as session:
+            if not self._experiment_exists_globally(session, int(self.DEFAULT_EXPERIMENT_ID)):
+                with self.ManagedSessionMaker(read_only=False) as write_session:
+                    self._create_default_experiment(write_session)
 
     def _get_dialect(self):
         return self.engine.dialect.name
@@ -515,6 +516,9 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
             session.execute(
                 sql.text(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values});")
             )
+        except IntegrityError:
+            # Another worker/process already created experiment 0 — safe to ignore.
+            pass
         finally:
             self._unset_zero_value_insertion_for_autoincrement_column(session)
 
@@ -534,6 +538,21 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
     def _get_artifact_location(self, experiment_id):
         return append_to_uri_path(self.artifact_root_uri, str(experiment_id))
 
+    def _get_tenant_artifact_location(self, tenant_slug: str) -> str | None:
+        """Return the artifact root override for ``tenant_slug``, or None if not set.
+
+        When a tenant has a ``storage_root`` configured, new experiments default to
+        ``{storage_root}/{experiment_id}/artifacts`` instead of the server-level root.
+        The experiment ID is not yet assigned at this point, so we return only the root;
+        the double-flush in create_experiment will append the ID.
+        """
+        try:
+            from mlflow.server.auth import store as auth_store
+            tenant = auth_store.get_tenant(tenant_slug)
+            return tenant.storage_root or None
+        except Exception:
+            return None
+
     def create_experiment(self, name, artifact_location=None, tags=None):
         _validate_experiment_name(name)
         if artifact_location:
@@ -545,13 +564,18 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
         with self.ManagedSessionMaker(read_only=False) as session:
             try:
                 creation_time = get_current_time_millis()
+                active_tenant_slug = get_active_tenant_slug()
+                effective_artifact_location = (
+                    artifact_location or self._get_tenant_artifact_location(active_tenant_slug)
+                )
                 experiment = self._with_workspace_field(
                     SqlExperiment(
                         name=name,
                         lifecycle_stage=LifecycleStage.ACTIVE,
-                        artifact_location=artifact_location,
+                        artifact_location=effective_artifact_location,
                         creation_time=creation_time,
                         last_update_time=creation_time,
+                        tenant=active_tenant_slug,
                     )
                 )
                 experiment.tags = (
@@ -559,7 +583,7 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
                 )
                 session.add(experiment)
                 session.flush()
-                if not artifact_location:
+                if not effective_artifact_location:
                     # This requires a double flush: the first assigns the autoincremented ID so that
                     # we can derive the default artifact URI, and the second persists the update.
                     experiment.artifact_location = self._get_artifact_location(
@@ -724,6 +748,7 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
             .filter(
                 SqlExperiment.experiment_id == experiment_id_int,
                 SqlExperiment.lifecycle_stage.in_(stages),
+                *self._experiment_where_clauses(),
             )
             .one_or_none()
         )
@@ -736,10 +761,16 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
         return experiment
 
     def _experiment_where_clauses(self):
-        """
-        Hook for subclasses to append additional filters to experiment queries.
-        """
-        return []
+        """Return tenant-scoping clause for all experiment queries."""
+        return [SqlExperiment.tenant == get_active_tenant_slug()]
+
+    def _experiment_exists_globally(self, session, experiment_id: int) -> bool:
+        """Check whether an experiment exists in ANY tenant (used for the default experiment)."""
+        return (
+            session.query(SqlExperiment.experiment_id)
+            .filter(SqlExperiment.experiment_id == experiment_id)
+            .first()
+        ) is not None
 
     def _filter_experiment_ids(self, session, experiment_ids):
         """
@@ -836,6 +867,7 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
                 .filter(
                     SqlExperiment.name == experiment_name,
                     SqlExperiment.lifecycle_stage.in_(stages),
+                    *self._experiment_where_clauses(),
                 )
                 .one_or_none()
             )
@@ -5893,7 +5925,10 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
             .with_entities(
                 SqlExperiment.experiment_id, SqlExperimentTag.key, SqlExperimentTag.value
             )
-            .filter(SqlExperiment.lifecycle_stage == LifecycleStage.ACTIVE)
+            .filter(
+                SqlExperiment.lifecycle_stage == LifecycleStage.ACTIVE,
+                *self._experiment_where_clauses(),
+            )
             .order_by(SqlExperiment.experiment_id.asc(), SqlExperimentTag.key.asc())
             .all()
         )
@@ -7422,7 +7457,10 @@ class SqlAlchemyStore(SqlAlchemyGatewayStoreMixin, AbstractStore):
                     str(row[0])
                     for row in self
                     ._get_query(session, SqlExperiment)
-                    .filter(SqlExperiment.experiment_id.in_(experiment_ids_str))
+                    .filter(
+                        SqlExperiment.experiment_id.in_(experiment_ids_str),
+                        *self._experiment_where_clauses(),
+                    )
                     .with_entities(SqlExperiment.experiment_id)
                     .all()
                 }

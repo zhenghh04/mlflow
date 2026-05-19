@@ -9,6 +9,7 @@ from mlflow.server.auth.entities import (
     Role,
     RolePermission,
     ScorerPermission,
+    Tenant,
     User,
     UserRoleAssignment,
 )
@@ -16,6 +17,11 @@ from mlflow.server.auth.routes import (
     ADD_ROLE_PERMISSION,
     ASSIGN_ROLE,
     CREATE_EXPERIMENT_PERMISSION,
+    CREATE_TENANT,
+    DELETE_TENANT,
+    GET_TENANT,
+    LIST_TENANTS,
+    UPDATE_TENANT,
     CREATE_GATEWAY_ENDPOINT_PERMISSION,
     CREATE_GATEWAY_MODEL_DEFINITION_PERMISSION,
     CREATE_GATEWAY_SECRET_PERMISSION,
@@ -659,3 +665,60 @@ class AuthServiceClient:
             "DELETE",
             json={"model_definition_id": model_definition_id, "username": username},
         )
+
+    # ------------------------------------------------------------------
+    # Tenant management (multi-tenancy)
+    # ------------------------------------------------------------------
+
+    def create_tenant(
+        self,
+        slug: str,
+        name: str,
+        storage_root: str | None = None,
+        max_experiments: int | None = None,
+        max_users: int | None = None,
+    ) -> Tenant:
+        response = self._request(
+            CREATE_TENANT,
+            "POST",
+            json={
+                "slug": slug,
+                "name": name,
+                "storage_root": storage_root,
+                "max_experiments": max_experiments,
+                "max_users": max_users,
+            },
+        )
+        return Tenant.from_json(response.json()["tenant"])
+
+    def get_tenant(self, slug: str) -> Tenant:
+        response = self._request(GET_TENANT, "GET", params={"slug": slug})
+        return Tenant.from_json(response.json()["tenant"])
+
+    def list_tenants(self) -> list[Tenant]:
+        response = self._request(LIST_TENANTS, "GET")
+        return [Tenant.from_json(t) for t in response.json()["tenants"]]
+
+    def update_tenant(
+        self,
+        slug: str,
+        name: str | None = None,
+        storage_root: str | None = None,
+        max_experiments: int | None = None,
+        max_users: int | None = None,
+    ) -> Tenant:
+        response = self._request(
+            UPDATE_TENANT,
+            "PATCH",
+            json={
+                "slug": slug,
+                "name": name,
+                "storage_root": storage_root,
+                "max_experiments": max_experiments,
+                "max_users": max_users,
+            },
+        )
+        return Tenant.from_json(response.json()["tenant"])
+
+    def delete_tenant(self, slug: str) -> None:
+        self._request(DELETE_TENANT, "DELETE", json={"slug": slug})

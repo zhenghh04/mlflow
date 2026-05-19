@@ -16,10 +16,13 @@ export class DefaultHeadersLink extends ApolloLink {
   }
 
   request(operation: Operation, forward: NextLink): Observable<FetchResult> {
+    // Read document.cookie fresh on every request so that SSO/auth cookies
+    // set after the Apollo client was created (e.g. post-login) are included.
+    const liveCookieStr = typeof document !== 'undefined' ? document.cookie : this.cookieStr;
     operation.setContext(({ headers = {} }) => ({
       headers: {
         ...headers,
-        ...getDefaultHeaders(this.cookieStr),
+        ...getDefaultHeaders(liveCookieStr),
       },
     }));
 

@@ -215,25 +215,38 @@ from mlflow.server.auth.permissions import (
 )
 from mlflow.server.auth.routes import (
     ADD_ROLE_PERMISSION,
+    ADD_TEAM_MEMBER,
     AJAX_ADD_ROLE_PERMISSION,
+    AJAX_ADD_TEAM_MEMBER,
     AJAX_ASSIGN_ROLE,
     AJAX_CREATE_ROLE,
+    AJAX_CREATE_TENANT,
     AJAX_CREATE_USER,
     AJAX_DELETE_ROLE,
+    AJAX_DELETE_TENANT,
+    AJAX_GET_USER_TEAMS,
+    AJAX_LIST_TEAM_MEMBERS,
+    AJAX_REMOVE_TEAM_MEMBER,
+    GET_USER_TEAMS,
+    LIST_TEAM_MEMBERS,
+    REMOVE_TEAM_MEMBER,
     AJAX_DELETE_USER,
     AJAX_GET_CURRENT_USER,
     AJAX_GET_ROLE,
+    AJAX_GET_TENANT,
     AJAX_GET_USER,
     AJAX_LIST_CURRENT_USER_PERMISSIONS,
     AJAX_LIST_ROLE_PERMISSIONS,
     AJAX_LIST_ROLE_USERS,
     AJAX_LIST_ROLES,
+    AJAX_LIST_TENANTS,
     AJAX_LIST_USER_PERMISSIONS,
     AJAX_LIST_USER_ROLES,
     AJAX_LIST_USERS,
     AJAX_REMOVE_ROLE_PERMISSION,
     AJAX_UNASSIGN_ROLE,
     AJAX_UPDATE_ROLE,
+    AJAX_UPDATE_TENANT,
     AJAX_UPDATE_ROLE_PERMISSION,
     AJAX_UPDATE_USER_ADMIN,
     AJAX_UPDATE_USER_PASSWORD,
@@ -245,6 +258,7 @@ from mlflow.server.auth.routes import (
     CREATE_PROMPTLAB_RUN,
     CREATE_REGISTERED_MODEL_PERMISSION,
     CREATE_ROLE,
+    CREATE_TENANT,
     CREATE_SCORER_PERMISSION,
     CREATE_USER,
     CREATE_USER_UI,
@@ -254,6 +268,7 @@ from mlflow.server.auth.routes import (
     DELETE_GATEWAY_SECRET_PERMISSION,
     DELETE_REGISTERED_MODEL_PERMISSION,
     DELETE_ROLE,
+    DELETE_TENANT,
     DELETE_SCORER_PERMISSION,
     DELETE_USER,
     GATEWAY_PROVIDER_CONFIG,
@@ -272,6 +287,7 @@ from mlflow.server.auth.routes import (
     GET_MODEL_VERSION_ARTIFACT,
     GET_REGISTERED_MODEL_PERMISSION,
     GET_ROLE,
+    GET_TENANT,
     GET_SCORER_PERMISSION,
     GET_TRACE_ARTIFACT,
     GET_USER,
@@ -281,6 +297,7 @@ from mlflow.server.auth.routes import (
     LIST_ROLE_PERMISSIONS,
     LIST_ROLE_USERS,
     LIST_ROLES,
+    LIST_TENANTS,
     LIST_USER_PERMISSIONS,
     LIST_USER_ROLES,
     LIST_USERS,
@@ -294,6 +311,7 @@ from mlflow.server.auth.routes import (
     UPDATE_GATEWAY_SECRET_PERMISSION,
     UPDATE_REGISTERED_MODEL_PERMISSION,
     UPDATE_ROLE,
+    UPDATE_TENANT,
     UPDATE_ROLE_PERMISSION,
     UPDATE_SCORER_PERMISSION,
     UPDATE_USER_ADMIN,
@@ -301,6 +319,19 @@ from mlflow.server.auth.routes import (
     UPLOAD_ARTIFACT,
 )
 from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
+from mlflow.tenant_context import resolve_tenant_slug, reset_active_tenant_slug, set_active_tenant_slug
+from mlflow.server.auth.sso import (
+    SSO_STATE_COOKIE,
+    SSO_TOKEN_COOKIE,
+    build_authorization_url,
+    exchange_code_for_token,
+    extract_groups,
+    extract_username,
+    get_user_info,
+    issue_session_token,
+    load_sso_config,
+    verify_session_token,
+)
 from mlflow.server.fastapi_app import create_fastapi_app
 from mlflow.server.handlers import (
     _add_static_prefix,
@@ -337,6 +368,22 @@ _logger = logging.getLogger(__name__)
 
 auth_config = read_auth_config()
 store = SqlAlchemyStore()
+
+# SSO config — loaded lazily when routes are registered
+_sso_config = None
+
+# ── Self-verifying OAuth2 CSRF state ────────────────────────────────────────
+# State format: base64url(timestamp:nonce).hmac_sha256[:16]
+# No server-side storage needed → works across all uvicorn workers.
+
+
+def _get_sso_config():
+    global _sso_config
+    if _sso_config is None:
+        import os as _os
+        cfg_path = _os.environ.get("MLFLOW_AUTH_CONFIG_PATH", "")
+        _sso_config = load_sso_config(cfg_path)
+    return _sso_config
 
 # Cache for resource_id -> workspace_name mapping. The relationship between a resource
 # (experiment, registered model) and its workspace is immutable.
@@ -427,7 +474,17 @@ def _invalidate_user_auth_cache(username: str) -> None:
             _USER_AUTH_CACHE.pop(key, None)
 
 
-_UNPROTECTED_PATH_PREFIXES = ("/static", "/favicon.ico", "/health")
+_UNPROTECTED_PATH_PREFIXES = (
+    "/static",
+    "/favicon.ico",
+    "/health",
+    "/static-files",  # static asset prefix used in some deployments
+    "/sso/",          # SSO login/callback routes must be accessible without auth
+)
+# The root path serves index.html (just HTML, no secrets).
+# The React app detects 401 on API calls and redirects to /#/login.
+_UNPROTECTED_EXACT_PATHS = {"/", "/manifest.json", "/asset-manifest.json",
+                             "/sso/providers", "/sso/verify"}
 
 
 def is_unprotected_route(path: str) -> bool:
@@ -436,21 +493,62 @@ def is_unprotected_route(path: str) -> bool:
     # both the unprefixed and the prefixed forms so health checks don't end
     # up requiring auth on prefixed deployments.
     prefixed = tuple(_add_static_prefix(p) for p in _UNPROTECTED_PATH_PREFIXES)
+    if path in _UNPROTECTED_EXACT_PATHS:
+        return True
     return path.startswith(_UNPROTECTED_PATH_PREFIXES) or path.startswith(prefixed)
 
 
 def make_basic_auth_response() -> Response:
+    # For browser requests (Accept: text/html) redirect to the login page so the
+    # user sees the styled form instead of a native Basic Auth dialog or a 401.
+    # API clients (curl, Python SDK, etc.) still receive the standard 401.
+    accept = request.headers.get("Accept", "")
+    if "text/html" in accept and request.method == "GET":
+        base = _add_static_prefix("/")
+        redirect_html = (
+            "<!doctype html><html><head>"
+            f'<meta http-equiv="refresh" content="0; url={base}#/login">'
+            f'<script>window.location.replace("{base}#/login");</script>'
+            "</head><body>Redirecting to login…</body></html>"
+        )
+        res = make_response(redirect_html)
+        res.status_code = 302
+        res.headers["Location"] = f"{base}#/login"
+        res.headers["Content-Type"] = "text/html; charset=utf-8"
+        return res
+    # API and GraphQL clients expect JSON — returning plain text causes
+    # JSON.parse errors in the React frontend on the graphql endpoint.
+    path = request.path
+    is_api = path.startswith(("/api/", "/ajax-api/", "/graphql"))
+    if is_api:
+        res = make_response(jsonify({
+            "error_code": "UNAUTHENTICATED",
+            "message": "You are not authenticated.",
+        }))
+        res.status_code = 401
+        return res
     res = make_response(
         "You are not authenticated. Please see "
         "https://www.mlflow.org/docs/latest/auth/index.html#authenticating-to-mlflow "
         "on how to authenticate."
     )
     res.status_code = 401
-    res.headers["WWW-Authenticate"] = 'Basic realm="mlflow"'
+    # Do NOT send WWW-Authenticate: Basic — that header triggers the browser's
+    # native username/password dialog which we want to replace with our own
+    # login page.  API clients (curl -u, Python SDK) handle 401 fine without it.
     return res
 
 
 def make_forbidden_response() -> Response:
+    path = request.path
+    is_api = path.startswith(("/api/", "/ajax-api/", "/graphql"))
+    if is_api:
+        res = make_response(jsonify({
+            "error_code": "PERMISSION_DENIED",
+            "message": "Permission denied.",
+        }))
+        res.status_code = 403
+        return res
     res = make_response("Permission denied")
     res.status_code = 403
     return res
@@ -1203,9 +1301,15 @@ def validate_can_manage_scorer_permission():
 
 
 def sender_is_admin():
-    """Validate if the sender is admin"""
-    username = authenticate_request().username
-    return store.get_user(username).is_admin
+    """True if the sender is the system admin OR is a team admin in the active team."""
+    try:
+        username = authenticate_request().username
+        user = store.get_user(username)
+        if user.is_admin:
+            return True
+        return store.is_team_admin(username)
+    except Exception:
+        return False
 
 
 def _is_workspace_admin(user_id: int, workspace: str) -> bool:
@@ -2311,8 +2415,49 @@ def get_auth_func(authorization_function: str) -> Callable[[], Authorization | R
     return getattr(module, fn_name)
 
 
+def _authenticate_sso_token() -> Authorization | None:
+    """Check for an SSO session token and return a synthetic Authorization.
+
+    Checks two sources (first match wins):
+    1. X-SSO-Token header — set explicitly by FetchUtils reading the
+       mlflow-request-header-X-SSO-Token cookie; reliable for all AJAX calls.
+    2. mlflow_sso_token cookie — fallback for non-FetchUtils requests
+       (e.g. server-rendered pages, curl).
+    """
+    secret_key = app.secret_key or ""
+
+    # 1. Explicit header (FetchUtils-forwarded cookie)
+    token = request.headers.get("X-SSO-Token", "")
+    if not token:
+        # 2. Implicit cookie (browser automatic)
+        token = request.cookies.get(SSO_TOKEN_COOKIE, "")
+
+    if not token:
+        return None
+
+    username = verify_session_token(token, secret_key)
+    if not username:
+        return None
+
+    # Reject tokens for users that no longer exist (e.g. deleted accounts).
+    # This makes the auth fall through to Basic Auth rather than returning a
+    # synthetic Authorization that then fails the team-membership check with a
+    # confusing 403 instead of a clean 401 / redirect-to-login.
+    if not store.has_user(username):
+        _logger.warning("SSO token for unknown user %r — treating as unauthenticated", username)
+        return None
+
+    from werkzeug.datastructures import Authorization as WerkzeugAuth
+    return WerkzeugAuth("sso", {"username": username, "password": ""})
+
+
 def authenticate_request_basic_auth() -> Authorization | Response:
-    """Authenticate the request using basic auth."""
+    """Authenticate the request using SSO token or HTTP Basic Auth."""
+    # Check SSO token first (set by the OAuth2 callback)
+    sso_auth = _authenticate_sso_token()
+    if sso_auth is not None:
+        return sso_auth
+
     if request.authorization is None:
         return make_basic_auth_response()
 
@@ -2379,6 +2524,13 @@ def _find_validator(req: Request) -> Callable[[], bool] | None:
 
 @catch_mlflow_exception
 def _before_request():
+    # Resolve the active tenant from headers and store it in the ContextVar so
+    # every store call downstream sees the correct tenant without explicit passing.
+    slug = resolve_tenant_slug(dict(request.headers))
+    _tenant_reset_token = set_active_tenant_slug(slug)
+    # Store the token on the request context so _after_request can reset it.
+    request.environ["_mlflow_tenant_reset_token"] = _tenant_reset_token
+
     if is_unprotected_route(request.path):
         return
 
@@ -2392,8 +2544,26 @@ def _before_request():
             INTERNAL_ERROR,
         )
 
-    # admins don't need to be authorized
-    if sender_is_admin():
+    # Team membership check: the user must be a member of the requested team.
+    # Global admins (user.is_admin=True) bypass this — is_team_member returns
+    # True for them regardless of explicit membership rows.
+    username = authorization.username
+    from mlflow.tenant_context import DEFAULT_TENANT_SLUG as _DEFAULT_SLUG
+
+    # Fast-path: check admin status first to avoid an extra DB round-trip for
+    # the membership query.
+    try:
+        user = store.get_user(username)
+        is_global_admin = bool(user.is_admin)
+    except Exception:
+        is_global_admin = False
+
+    if not is_global_admin:
+        if slug != _DEFAULT_SLUG and not store.is_team_member(username, slug):
+            return make_forbidden_response()
+
+    # admins (system or team) don't need further authorization
+    if is_global_admin or sender_is_admin():
         return
 
     # authorization
@@ -2404,6 +2574,13 @@ def _before_request():
         if validator := _get_proxy_artifact_validator(request.method, request.view_args):
             if not validator():
                 return make_forbidden_response()
+
+
+def _reset_tenant_context(resp: Response) -> Response:
+    token = request.environ.pop("_mlflow_tenant_reset_token", None)
+    if token is not None:
+        reset_active_tenant_slug(token)
+    return resp
 
 
 def set_can_manage_experiment_permission(resp: Response):
@@ -2430,6 +2607,378 @@ def delete_can_manage_registered_model_permission(resp: Response):
     """
     name = request.get_json(force=True, silent=True)["name"]
     store.delete_grants_for_resource("registered_model", name, workspace_scoped=True)
+
+
+# ---- SSO (Single Sign-On) routes ----
+
+@app.route("/sso/providers", methods=["GET"])
+def sso_providers():
+    """Return configured SSO providers for the login page."""
+    sso = _get_sso_config()
+    if not sso.enabled:
+        return jsonify({"providers": []})
+    return jsonify({
+        "providers": [
+            {"id": pid, "name": p.name, "icon": p.icon, "type": p.provider_type}
+            for pid, p in sso.providers.items()
+            if p.client_id
+        ]
+    })
+
+
+@app.route("/sso/login", methods=["GET"])
+def sso_login():
+    """Start the OAuth2 flow — redirect user to the provider."""
+    sso = _get_sso_config()
+    if not sso.enabled:
+        return make_response("SSO is not enabled", 404)
+
+    provider_id = request.args.get("provider", "")
+    provider = sso.providers.get(provider_id)
+    if not provider or not provider.client_id:
+        return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
+
+    import secrets as _secrets, time as _time, hmac as _hmac, hashlib as _hl, base64 as _b64
+
+    # Build a self-verifying CSRF state token so no server-side storage is
+    # needed — works across all uvicorn workers.
+    nonce = _secrets.token_urlsafe(16)
+    ts = str(int(_time.time()))
+    payload = f"{ts}:{nonce}"
+    b64_payload = _b64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    sig = _hmac.new(
+        (app.secret_key or "").encode(), b64_payload.encode(), _hl.sha256
+    ).hexdigest()[:24]
+    state = f"{b64_payload}.{sig}"
+
+    redirect_uri = f"{sso.server_url.rstrip('/')}/sso/callback/{provider_id}"
+    auth_url = build_authorization_url(provider, redirect_uri, state)
+
+    resp = make_response()
+    resp.status_code = 302
+    resp.headers["Location"] = auth_url
+    return resp
+
+
+@app.route("/sso/callback/<provider_id>", methods=["GET"])
+def sso_callback(provider_id: str):
+    """Handle OAuth2 callback: exchange code, provision user, issue JWT."""
+    sso = _get_sso_config()
+    if not sso.enabled:
+        return make_response("SSO is not enabled", 404)
+
+    provider = sso.providers.get(provider_id)
+    if not provider or not provider.client_id:
+        return make_response(f"Unknown SSO provider: {provider_id!r}", 400)
+
+    # CSRF check — verify self-contained HMAC state (no server storage, works
+    # across all uvicorn workers).
+    import time as _time, hmac as _hmac, hashlib as _hl, base64 as _b64
+
+    received_state = request.args.get("state", "")
+    _state_error = None
+    try:
+        b64_payload, sig = received_state.rsplit(".", 1)
+        expected_sig = _hmac.new(
+            (app.secret_key or "").encode(), b64_payload.encode(), _hl.sha256
+        ).hexdigest()[:24]
+        if not _hmac.compare_digest(sig, expected_sig):
+            _state_error = "invalid signature"
+        else:
+            payload = _b64.urlsafe_b64decode(b64_payload + "==").decode()
+            ts = int(payload.split(":")[0])
+            if _time.time() - ts > 600:
+                _state_error = "expired"
+    except Exception:
+        _state_error = "malformed"
+
+    if _state_error:
+        return make_response(
+            f"SSO login failed ({_state_error}) — please try again", 400
+        )
+
+    # Exchange code
+    code = request.args.get("code", "")
+    if not code:
+        error = request.args.get("error", "unknown")
+        return make_response(f"SSO provider returned error: {error}", 400)
+
+    redirect_uri = f"{sso.server_url.rstrip('/')}/sso/callback/{provider_id}"
+    try:
+        token_response = exchange_code_for_token(provider, code, redirect_uri)
+        user_info = get_user_info(provider, token_response)
+    except Exception as exc:
+        _logger.error("SSO token exchange failed for %s: %s", provider_id, exc)
+        return make_response(f"SSO authentication failed: {exc}", 502)
+
+    # Extract identity
+    try:
+        username = extract_username(user_info, provider)
+    except ValueError as exc:
+        return make_response(str(exc), 400)
+
+    display_name = user_info.get("name") or user_info.get("login") or username
+    email = user_info.get("email", "")
+    groups = extract_groups(user_info)
+
+    # Provision user if they don't exist yet
+    _sso_provision_user(username, display_name, email, provider, groups)
+
+    # Issue session JWT
+    secret_key = app.secret_key or ""
+    token = issue_session_token(username, secret_key)
+
+    # Pass the token in the URL fragment so the React SSOCompletePage can
+    # set the cookie via JavaScript. This avoids the browser forwarding
+    # Set-Cookie headers across the ASGI redirect boundary.
+    from urllib.parse import quote as _quote
+    resp = make_response()
+    resp.status_code = 302
+    resp.headers["Location"] = f"/#/sso-complete?t={_quote(token, safe='')}"
+    return resp
+
+
+def _sso_provision_user(
+    username: str,
+    display_name: str,
+    email: str,
+    provider,
+    groups: list[str],
+) -> None:
+    """Create user on first SSO login; ensure team memberships are current."""
+    from mlflow.tenant_context import DEFAULT_TENANT_SLUG, set_active_tenant_slug, reset_active_tenant_slug
+
+    # Check if user already exists
+    try:
+        user = store.get_user(username)
+        # Update profile info if it has changed
+        try:
+            store.update_profile(username, display_name=display_name, email=email)
+        except Exception:
+            pass
+    except Exception:
+        # New user — create with a random password (SSO users don't need one)
+        import secrets as _sec
+        random_pw = _sec.token_urlsafe(32) + "A1!"  # satisfies password policy
+        # Create in default tenant first (home tenant auto-created by create_user)
+        token = set_active_tenant_slug(DEFAULT_TENANT_SLUG)
+        try:
+            store.create_user(username, random_pw, is_admin=False, role="member")
+            store.update_profile(username, display_name=display_name, email=email)
+        except Exception as exc:
+            _logger.warning("SSO user provisioning failed for %s: %s", username, exc)
+        finally:
+            reset_active_tenant_slug(token)
+
+    # Auto-assign to teams based on group→team map
+    group_set = set(groups)
+    for group, team_slug in provider.group_team_map.items():
+        if group in group_set:
+            try:
+                token = set_active_tenant_slug(team_slug)
+                try:
+                    store.add_team_member(username=username, role=provider.default_role)
+                finally:
+                    reset_active_tenant_slug(token)
+            except Exception as exc:
+                _logger.warning("SSO group→team assignment failed (%s→%s): %s", group, team_slug, exc)
+
+    # Add to configured default team if set
+    if provider.default_team:
+        try:
+            token = set_active_tenant_slug(provider.default_team)
+            try:
+                store.add_team_member(username=username, role=provider.default_role)
+            finally:
+                reset_active_tenant_slug(token)
+        except Exception as exc:
+            _logger.warning("SSO default_team assignment failed: %s", exc)
+
+
+@app.route("/sso/verify", methods=["GET"])
+def sso_verify():
+    """Verify an SSO token and return the username + team list.
+
+    Called by SSOCompletePage after it receives the token in the URL fragment.
+    The response allows the client to set the auth cookie via JavaScript.
+    """
+    token = request.args.get("t", "")
+    if not token:
+        return make_response(jsonify({"error": "missing token"}), 400)
+
+    secret_key = app.secret_key or ""
+    username = verify_session_token(token, secret_key)
+    if not username:
+        return make_response(jsonify({"error": "invalid or expired token"}), 401)
+
+    teams = store.get_user_teams(username)
+    preferred_team = next(
+        (t.slug for t, _ in teams if t.slug != "default"), "default"
+    )
+    return jsonify({
+        "username": username,
+        "token": token,
+        "preferred_team": preferred_team,
+    })
+
+
+@app.route("/sso/logout", methods=["POST", "GET"])
+def sso_logout():
+    """Clear all auth cookies server-side and redirect to the login page."""
+    resp = make_response()
+    resp.status_code = 302
+    resp.headers["Location"] = "/oauth2/sign_out?rd=https%3A%2F%2Fauth.globus.org%2Fv2%2Fweb%2Flogout"
+    # Clear every auth cookie the server knows about — server-side Set-Cookie
+    # is reliable regardless of Secure/SameSite attributes.
+    _all_auth_cookies = [
+        SSO_TOKEN_COOKIE,
+        "mlflow-request-header-Authorization",
+        "mlflow_user",
+        "mlflow-request-header-X-MLflow-Tenant",
+        "mlflow_active_team",
+    ]
+    for name in _all_auth_cookies:
+        resp.set_cookie(name, "", max_age=0, path="/")
+    return resp
+
+
+# ---- Model visibility handler ----
+
+@app.route("/ajax-api/2.0/mlflow/users/profile", methods=["GET"])
+@catch_mlflow_exception
+def get_user_profile():
+    """Return full profile (fields + teams) for the authenticated user."""
+    username = authenticate_request().username
+    profile = store.get_user_profile(username)
+    return jsonify({"profile": profile})
+
+
+@app.route("/ajax-api/2.0/mlflow/users/update-profile", methods=["PATCH"])
+@catch_mlflow_exception
+def update_user_profile():
+    """Update profile fields for the authenticated user.
+
+    Accepts a JSON body with any subset of:
+    display_name, email, title, department, location, bio,
+    github, orcid, avatar_url (base64 data URL).
+    """
+    username = authenticate_request().username
+    body = request.get_json(silent=True) or {}
+    user = store.update_profile(
+        username=username,
+        display_name=body.get("display_name"),
+        email=body.get("email"),
+        title=body.get("title"),
+        department=body.get("department"),
+        location=body.get("location"),
+        bio=body.get("bio"),
+        github=body.get("github"),
+        orcid=body.get("orcid"),
+        avatar_url=body.get("avatar_url"),
+    )
+    _invalidate_user_auth_cache(username)
+    return jsonify({"user": user.to_json()})
+
+
+@app.route("/ajax-api/2.0/mlflow/users/global-admins", methods=["GET"])
+@catch_mlflow_exception
+def list_global_admins():
+    """Return all users with is_admin=True regardless of active team.
+    System-admin only — used by the GlobalAdmins section in the Admin UI.
+    """
+    if not sender_is_admin():
+        return make_forbidden_response()
+    from mlflow.server.auth.db.models import SqlUser
+    with store.ManagedSessionMaker() as session:
+        # Extract data inside the session so ORM objects are not detached
+        rows = [
+            {"id": u.id, "username": u.username, "is_admin": True}
+            for u in session.query(SqlUser).filter(SqlUser.is_admin.is_(True)).all()
+        ]
+    return jsonify({"users": rows})
+
+
+@app.route("/ajax-api/2.0/mlflow/registered-models/list-admin", methods=["GET"])
+@catch_mlflow_exception
+def list_models_admin():
+    """Return registered models with visibility for the admin panel."""
+    import sqlalchemy
+    store_obj = _get_model_registry_store()
+    # Direct DB query to get visibility (not exposed in standard proto).
+    from mlflow.store.model_registry.dbmodels.models import SqlRegisteredModel, SqlModelVersion
+    from mlflow.tenant_context import get_active_tenant_slug
+    with store_obj.ManagedSessionMaker() as session:
+        rows = (
+            session.query(
+                SqlRegisteredModel.name,
+                SqlRegisteredModel.visibility,
+                SqlRegisteredModel.tenant,
+            )
+            .filter(
+                sqlalchemy.or_(
+                    SqlRegisteredModel.tenant == get_active_tenant_slug(),
+                    SqlRegisteredModel.visibility == "public",
+                )
+            )
+            .all()
+        )
+        # Count versions per model
+        version_counts = dict(
+            session.query(SqlModelVersion.name, sqlalchemy.func.count(SqlModelVersion.version))
+            .filter(SqlModelVersion.name.in_([r[0] for r in rows]))
+            .group_by(SqlModelVersion.name)
+            .all()
+        )
+    return jsonify({
+        "models": [
+            {
+                "name": name,
+                "visibility": vis,
+                "tenant": tenant,
+                "version_count": version_counts.get(name, 0),
+            }
+            for name, vis, tenant in rows
+        ]
+    })
+
+
+@app.route("/api/2.0/mlflow/registered-models/set-visibility", methods=["POST"])
+@app.route("/ajax-api/2.0/mlflow/registered-models/set-visibility", methods=["POST"])
+@catch_mlflow_exception
+def set_model_visibility_handler():
+    """Set a registered model's visibility to 'team' or 'public'.
+
+    Body: { "name": "<model>", "visibility": "team" | "public" }
+    Requires MANAGE permission on the model or team-admin status.
+    """
+    body = request.get_json(silent=True) or {}
+    name = body.get("name", "")
+    visibility = body.get("visibility", "")
+    if not name:
+        return make_response(jsonify({"message": "name is required"}), 400)
+    if visibility not in ("team", "public"):
+        return make_response(jsonify({"message": "visibility must be 'team' or 'public'"}), 400)
+
+    # Permission check: MANAGE on this model OR team admin.
+    # Re-use _get_permission_from_registered_model_name but pull name from the
+    # body we already parsed (the helper reads from request params by default).
+    if not sender_is_admin():
+        username = authenticate_request().username
+        perm = _get_role_permission_or_default(
+            _role_permission_for(
+                username=username,
+                resource_type="registered_model",
+                resource_key=name,
+                workspace_lookup_id=name,
+                workspace_fetcher=_get_model_registry_store().get_registered_model,
+                workspace_label="registered model",
+            )
+        )
+        if not perm.can_manage:
+            return make_forbidden_response()
+
+    _get_model_registry_store().set_model_visibility(name, visibility)
+    return jsonify({"name": name, "visibility": visibility})
 
 
 # ---- Role management handlers (RBAC) ----
@@ -3209,13 +3758,17 @@ def create_user():
     if not request.is_json:
         return make_response("Invalid content type. Must be application/json", 400)
 
-    username = _get_request_param("username")
-    password = _get_request_param("password")
+    body = request.get_json(silent=True) or {}
+    username = body.get("username", "")
+    password = body.get("password", "")
+    role = body.get("role", "member")
 
     if not username or not password:
         return make_response("Username and password cannot be empty.", 400)
+    if role not in ("admin", "member"):
+        return make_response("role must be 'admin' or 'member'.", 400)
 
-    user = store.create_user(username, password)
+    user = store.create_user(username, password, role=role)
     return jsonify({"user": user.to_json()})
 
 
@@ -3268,9 +3821,19 @@ def get_current_user():
     # that swap in a custom ``authorization_function``.
     username = authenticate_request().username
     user = store.get_user(username)
-    is_basic_auth = auth_config.authorization_function == DEFAULT_AUTHORIZATION_FUNCTION
+    is_basic_auth = True  # auth via oauth2-proxy
+    team_role = store.get_team_role(username)
     return jsonify({
-        "user": {"id": user.id, "username": user.username, "is_admin": user.is_admin},
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "is_admin": user.is_admin or team_role == "admin",
+            "is_global_admin": user.is_admin,
+            "team_role": team_role,
+            # Profile fields inline so the sidebar/header can show display_name/avatar
+            "display_name": user.display_name,
+            "avatar_url": user.avatar_url,
+        },
         "is_basic_auth": is_basic_auth,
     })
 
@@ -3436,8 +3999,20 @@ def update_user_password():
 @catch_mlflow_exception
 def update_user_admin():
     username = _get_request_param("username")
-    is_admin = _get_request_param("is_admin")
-    store.update_user(username, is_admin=is_admin)
+    body = request.get_json(silent=True) or {}
+    role = body.get("role")
+
+    if role in ("admin", "member"):
+        # Team-role update — update membership in the active team
+        store.add_team_member(username=username, role=role)
+    else:
+        # Global admin flag — directly set users.is_admin regardless of active tenant
+        is_admin = body.get("is_admin", _get_request_param("is_admin"))
+        with store.ManagedSessionMaker(read_only=False) as session:
+            user = store._get_user(session, username)
+            user.is_admin = bool(is_admin)
+            session.flush()
+
     _invalidate_user_auth_cache(username)
     return make_response({})
 
@@ -4157,7 +4732,7 @@ def add_fastapi_permission_middleware(app: FastAPI) -> None:
                 "https://www.mlflow.org/docs/latest/auth/index.html#authenticating-to-mlflow "
                 "on how to authenticate.",
                 status_code=HTTPStatus.UNAUTHORIZED,
-                headers={"WWW-Authenticate": 'Basic realm="mlflow"'},
+                # No WWW-Authenticate header — prevents browser native auth dialog
             )
 
         # Store user info in request state for downstream handlers (e.g., gateway tracing)
@@ -4186,6 +4761,140 @@ def add_fastapi_permission_middleware(app: FastAPI) -> None:
 
 # Role management routes (RBAC). Each route is exposed at both the REST path (Python
 # client) and the AJAX path (MLflow frontend). Registration loop lives inside create_app.
+def _require_system_admin():
+    """Return a 403 if the caller is not a system-level admin."""
+    if not sender_is_admin():
+        return make_forbidden_response()
+
+
+# ---- Team membership handlers ----
+
+def add_team_member():
+    username = _get_request_param("username")
+    role = (request.get_json(silent=True) or {}).get("role", "member")
+    if role not in ("admin", "member"):
+        return jsonify({"error_code": "INVALID_PARAMETER_VALUE", "message": "role must be 'admin' or 'member'"}), 400
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    membership = store.add_team_member(username=username, role=role)
+    return jsonify({"membership": membership.to_json()})
+
+
+def remove_team_member():
+    username = _get_request_param("username")
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    store.remove_team_member(username=username)
+    return jsonify({})
+
+
+def list_team_members():
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    members = store.list_team_members()
+    return jsonify({
+        "members": [
+            {"username": u.username, "is_admin": u.is_admin, "role": role}
+            for u, role in members
+        ]
+    })
+
+
+def get_user_teams():
+    """Return all teams the current authenticated user belongs to."""
+    username = authenticate_request().username
+    teams = store.get_user_teams(username)
+    return jsonify({
+        "teams": [
+            {"slug": t.slug, "name": t.name, "role": role}
+            for t, role in teams
+        ]
+    })
+
+
+_TEAM_MEMBERSHIP_ROUTES: list[tuple[Callable[[], Any], str, str, str]] = [
+    (add_team_member, "POST", ADD_TEAM_MEMBER, AJAX_ADD_TEAM_MEMBER),
+    (remove_team_member, "DELETE", REMOVE_TEAM_MEMBER, AJAX_REMOVE_TEAM_MEMBER),
+    (list_team_members, "GET", LIST_TEAM_MEMBERS, AJAX_LIST_TEAM_MEMBERS),
+    (get_user_teams, "GET", GET_USER_TEAMS, AJAX_GET_USER_TEAMS),
+]
+
+
+# ---- Tenant management handlers ----
+
+def create_tenant():
+    slug = _get_request_param("slug")
+    name = _get_request_param("name")
+    storage_root = request.json.get("storage_root") if request.is_json else None
+    max_experiments = request.json.get("max_experiments") if request.is_json else None
+    max_users = request.json.get("max_users") if request.is_json else None
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenant = store.create_tenant(
+        slug=slug,
+        name=name,
+        storage_root=storage_root,
+        max_experiments=max_experiments,
+        max_users=max_users,
+    )
+    return jsonify({"tenant": tenant.to_json()})
+
+
+def get_tenant():
+    slug = _get_request_param("slug")
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenant = store.get_tenant(slug)
+    return jsonify({"tenant": tenant.to_json()})
+
+
+def list_tenants():
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenants = store.list_tenants()
+    return jsonify({"tenants": [t.to_json() for t in tenants]})
+
+
+def update_tenant():
+    slug = _get_request_param("slug")
+    body = request.get_json(silent=True) or {}
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    tenant = store.update_tenant(
+        slug=slug,
+        name=body.get("name"),
+        storage_root=body.get("storage_root"),
+        max_experiments=body.get("max_experiments"),
+        max_users=body.get("max_users"),
+    )
+    return jsonify({"tenant": tenant.to_json()})
+
+
+def delete_tenant():
+    slug = _get_request_param("slug")
+    denied = _require_system_admin()
+    if denied:
+        return denied
+    store.delete_tenant(slug)
+    return jsonify({})
+
+
+_TENANT_ROUTES: list[tuple[Callable[[], Any], str, str, str]] = [
+    (create_tenant, "POST", CREATE_TENANT, AJAX_CREATE_TENANT),
+    (get_tenant, "GET", GET_TENANT, AJAX_GET_TENANT),
+    (list_tenants, "GET", LIST_TENANTS, AJAX_LIST_TENANTS),
+    (update_tenant, "PATCH", UPDATE_TENANT, AJAX_UPDATE_TENANT),
+    (delete_tenant, "DELETE", DELETE_TENANT, AJAX_DELETE_TENANT),
+]
+
+
 _RBAC_ROUTES: list[tuple[Callable[[], Any], str, str, str]] = [
     (create_role, "POST", CREATE_ROLE, AJAX_CREATE_ROLE),
     (get_role, "GET", GET_ROLE, AJAX_GET_ROLE),
@@ -4443,7 +5152,18 @@ def create_app(app: Flask = app):
         for path in (rest_path, ajax_path):
             app.add_url_rule(rule=path, view_func=view_func, methods=[method])
 
+    # Tenant management routes (multi-tenancy) — see _TENANT_ROUTES at module scope.
+    for view_func, method, rest_path, ajax_path in _TENANT_ROUTES:
+        for path in (rest_path, ajax_path):
+            app.add_url_rule(rule=path, view_func=view_func, methods=[method])
+
+    # Team membership routes — see _TEAM_MEMBERSHIP_ROUTES at module scope.
+    for view_func, method, rest_path, ajax_path in _TEAM_MEMBERSHIP_ROUTES:
+        for path in (rest_path, ajax_path):
+            app.add_url_rule(rule=path, view_func=view_func, methods=[method])
+
     app.before_request(_before_request)
+    app.after_request(_reset_tenant_context)
     app.after_request(_after_request)
 
     if _MLFLOW_SGI_NAME.get() == "uvicorn":

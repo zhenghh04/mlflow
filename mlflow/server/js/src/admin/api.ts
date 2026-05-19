@@ -345,4 +345,151 @@ export const AdminApi = {
       error: defaultErrorHandler,
     }) as Promise<{ model_definitions?: { model_definition_id: string; name: string }[] }>;
   },
+
+  // Project (experiment) management
+  createExperiment: (name: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/create',
+      method: 'POST',
+      body: JSON.stringify({ name }),
+      error: defaultErrorHandler,
+    }) as Promise<{ experiment_id: string }>;
+  },
+
+  deleteExperiment: (experimentId: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/delete',
+      method: 'DELETE',
+      body: JSON.stringify({ experiment_id: experimentId }),
+      error: defaultErrorHandler,
+    });
+  },
+
+  searchExperiments: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/search',
+      method: 'POST',
+      body: JSON.stringify({ max_results: 1000 }),
+      error: defaultErrorHandler,
+    }) as Promise<{ experiments?: { experiment_id: string; name: string; lifecycle_stage: string; creation_time: number }[] }>;
+  },
+
+  // Team membership (multi-tenant)
+  listTeamMembers: () =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/teams/members/list',
+      error: defaultErrorHandler,
+    }) as Promise<{ members?: { username: string; is_admin: boolean; role: string }[] }>,
+
+  addTeamMember: (username: string, role: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/teams/members/add',
+      method: 'POST',
+      body: JSON.stringify({ username, role }),
+      error: defaultErrorHandler,
+    }) as Promise<{ membership: { role: string } }>,
+
+  removeTeamMember: (username: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/teams/members/remove',
+      method: 'DELETE',
+      body: JSON.stringify({ username }),
+      error: defaultErrorHandler,
+    }),
+
+  // Per-experiment permissions
+  getExperimentPermission: (experimentId: string, username: string) => {
+    const params = new URLSearchParams({ experiment_id: experimentId, username });
+    return fetchEndpoint({
+      relativeUrl: `ajax-api/2.0/mlflow/experiments/permissions/get?${params.toString()}`,
+      error: defaultErrorHandler,
+    }) as Promise<{ experiment_permission?: { permission: string } }>;
+  },
+
+  // ---- Team (tenant) management ----
+  listTeams: () =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/list',
+      error: defaultErrorHandler,
+    }) as Promise<{ tenants?: { id: number; slug: string; name: string; storage_root?: string; max_experiments?: number; max_users?: number }[] }>,
+
+  createTeam: (slug: string, name: string, storage_root?: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/create',
+      method: 'POST',
+      body: JSON.stringify({ slug, name, storage_root }),
+      error: defaultErrorHandler,
+    }) as Promise<{ tenant: { id: number; slug: string; name: string } }>,
+
+  deleteTeam: (slug: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/delete',
+      method: 'DELETE',
+      body: JSON.stringify({ slug }),
+      error: defaultErrorHandler,
+    }),
+
+  updateTeam: (slug: string, name: string, storage_root?: string) =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/3.0/mlflow/tenants/update',
+      method: 'PATCH',
+      body: JSON.stringify({ slug, name, storage_root }),
+      error: defaultErrorHandler,
+    }) as Promise<{ tenant: { slug: string; name: string } }>,
+
+  /** System-wide list of global admins (is_admin=true), not team-scoped. */
+  listGlobalAdmins: () =>
+    fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/users/global-admins',
+      error: defaultErrorHandler,
+    }) as Promise<{ users?: { id: number; username: string; is_admin: boolean }[] }>,
+
+  setModelVisibility: (name: string, visibility: 'team' | 'public') => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/registered-models/set-visibility',
+      method: 'POST',
+      body: JSON.stringify({ name, visibility }),
+      error: defaultErrorHandler,
+    }) as Promise<{ name: string; visibility: string }>;
+  },
+
+  listRegisteredModels: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/registered-models/search?max_results=1000',
+      error: defaultErrorHandler,
+    }) as Promise<{ registered_models?: { name: string; visibility?: string; latest_versions: { version: string; current_stage: string }[] }[] }>;
+  },
+
+  /** Admin-only: list models with visibility from our custom endpoint. */
+  listModelsAdmin: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/registered-models/list-admin',
+      error: defaultErrorHandler,
+    }) as Promise<{ models?: { name: string; visibility: string; tenant: string; version_count: number }[] }>;
+  },
+
+  renameExperiment: (experimentId: string, newName: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/update',
+      method: 'POST',
+      body: JSON.stringify({ experiment_id: experimentId, new_name: newName }),
+      error: defaultErrorHandler,
+    });
+  },
+
+  updateExperimentPermission: (experimentId: string, username: string, permission: string) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/experiments/permissions/update',
+      method: 'PATCH',
+      body: JSON.stringify({ experiment_id: experimentId, username, permission }),
+      error: defaultErrorHandler,
+    });
+  },
 };
+
+export const getUserTeams = () =>
+  fetchEndpoint({
+    relativeUrl: 'ajax-api/3.0/mlflow/users/teams',
+    error: async ({ reject, err }: { reject: (cause: any) => void; response: Response | undefined; err: Error }) =>
+      reject(err),
+  }) as Promise<{ teams?: { slug: string; name: string; role: string }[] }>;

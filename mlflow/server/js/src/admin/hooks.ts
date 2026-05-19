@@ -54,6 +54,7 @@ export const AdminQueryKeys = {
   roleUsers: (roleId: number) => ['admin_role_users', roleId] as const,
   resourceOptions: (resourceType: string) => ['admin_resource_options', resourceType] as const,
   userPermissions: (username: string) => ['admin_user_permissions', username] as const,
+  teamMembers: ['admin_team_members'] as const,
 };
 
 /** Direct (non-role-derived) grants for an arbitrary user. Admin / self / WP-admin-of-target. */
@@ -74,6 +75,36 @@ export const useUsersQuery = () => {
     queryFn: AdminApi.listUsers,
     retry: false,
     refetchOnWindowFocus: false,
+  });
+};
+
+// Team membership queries and mutations (multi-tenant)
+export const useTeamMembersQuery = () => {
+  return useQuery({
+    queryKey: AdminQueryKeys.teamMembers,
+    queryFn: AdminApi.listTeamMembers,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useAddTeamMember = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ username, role }: { username: string; role: string }) => AdminApi.addTeamMember(username, role),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.teamMembers });
+    },
+  });
+};
+
+export const useRemoveTeamMember = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (username: string) => AdminApi.removeTeamMember(username),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.teamMembers });
+    },
   });
 };
 
@@ -340,4 +371,202 @@ export const useResourceOptionsQuery = (resourceType: string) => {
       break;
   }
   return { options, isLoading, error };
+};
+
+
+// ---- Project (experiment) management ----
+
+export const AdminExperimentQueryKeys = {
+  experiments: ['admin_experiments'] as const,
+  experimentPermission: (experimentId: string, username: string) =>
+    ['admin_experiment_permission', experimentId, username] as const,
+};
+
+export const useExperimentsQuery = () => {
+  return useQuery({
+    queryKey: AdminExperimentQueryKeys.experiments,
+    queryFn: AdminApi.searchExperiments,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useCreateExperiment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => AdminApi.createExperiment(name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminExperimentQueryKeys.experiments });
+    },
+  });
+};
+
+export const useDeleteExperiment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (experimentId: string) => AdminApi.deleteExperiment(experimentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminExperimentQueryKeys.experiments });
+    },
+  });
+};
+
+export const useRenameExperiment = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ experimentId, newName }: { experimentId: string; newName: string }) =>
+      AdminApi.renameExperiment(experimentId, newName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminExperimentQueryKeys.experiments });
+    },
+  });
+};
+
+export const useExperimentPermissionQuery = (experimentId: string, username: string) => {
+  return useQuery({
+    queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+    queryFn: () => AdminApi.getExperimentPermission(experimentId, username),
+    enabled: Boolean(experimentId) && Boolean(username),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useGrantExperimentPermission = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      experimentId,
+      username,
+      permission,
+    }: {
+      experimentId: string;
+      username: string;
+      permission: string;
+    }) => AdminApi.grantUserPermission('experiment', experimentId, username, permission),
+    onSuccess: (_data, { experimentId, username }) => {
+      queryClient.invalidateQueries({
+        queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+      });
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.userPermissions(username) });
+    },
+  });
+};
+
+export const useRevokeExperimentPermission = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ experimentId, username }: { experimentId: string; username: string }) =>
+      AdminApi.revokeUserPermission('experiment', experimentId, username),
+    onSuccess: (_data, { experimentId, username }) => {
+      queryClient.invalidateQueries({
+        queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+      });
+      queryClient.invalidateQueries({ queryKey: AdminQueryKeys.userPermissions(username) });
+    },
+  });
+};
+
+export const useUpdateExperimentPermission = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      experimentId,
+      username,
+      permission,
+    }: {
+      experimentId: string;
+      username: string;
+      permission: string;
+    }) => AdminApi.updateExperimentPermission(experimentId, username, permission),
+    onSuccess: (_data, { experimentId, username }) => {
+      queryClient.invalidateQueries({
+        queryKey: AdminExperimentQueryKeys.experimentPermission(experimentId, username),
+      });
+    },
+  });
+};
+
+// ---- Model visibility ----
+
+export const AdminModelQueryKeys = {
+  models: ['admin_models'] as const,
+};
+
+export const useRegisteredModelsQuery = () => {
+  return useQuery({
+    queryKey: AdminModelQueryKeys.models,
+    queryFn: AdminApi.listModelsAdmin,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useSetModelVisibility = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, visibility }: { name: string; visibility: 'team' | 'public' }) =>
+      AdminApi.setModelVisibility(name, visibility),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminModelQueryKeys.models });
+    },
+  });
+};
+
+// ---- Team (tenant) management ----
+
+export const AdminTeamQueryKeys = {
+  teams: ['admin_teams'] as const,
+};
+
+export const useTeamsQuery = () => {
+  return useQuery({
+    queryKey: AdminTeamQueryKeys.teams,
+    queryFn: AdminApi.listTeams,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+};
+
+export const useCreateTeam = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, name, storage_root }: { slug: string; name: string; storage_root?: string }) =>
+      AdminApi.createTeam(slug, name, storage_root),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminTeamQueryKeys.teams });
+    },
+  });
+};
+
+export const useDeleteTeam = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (slug: string) => AdminApi.deleteTeam(slug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminTeamQueryKeys.teams });
+    },
+  });
+};
+
+export const useUpdateTeam = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, name, storage_root }: { slug: string; name: string; storage_root?: string }) =>
+      AdminApi.updateTeam(slug, name, storage_root),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: AdminTeamQueryKeys.teams });
+    },
+  });
+};
+
+// ---- Global admins (system-wide, not team-scoped) ----
+
+export const useGlobalAdminsQuery = () => {
+  return useQuery({
+    queryKey: ['admin_global_admins'],
+    queryFn: AdminApi.listGlobalAdmins,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
 };

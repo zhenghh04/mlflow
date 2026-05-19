@@ -64,4 +64,32 @@ export const AccountApi = {
       error: defaultErrorHandler,
     }) as Promise<ListMyPermissionsResponse>;
   },
+
+  getProfile: () => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/users/profile',
+      error: defaultErrorHandler,
+    }) as Promise<{
+      profile: {
+        id: number; username: string; is_admin: boolean;
+        display_name?: string; email?: string; title?: string;
+        department?: string; location?: string; bio?: string;
+        github?: string; orcid?: string; avatar_url?: string;
+        teams?: { slug: string; name: string; role: string }[];
+      };
+    }>;
+  },
+
+  updateProfile: (fields: {
+    display_name?: string; email?: string; title?: string;
+    department?: string; location?: string; bio?: string;
+    github?: string; orcid?: string; avatar_url?: string;
+  }) => {
+    return fetchEndpoint({
+      relativeUrl: 'ajax-api/2.0/mlflow/users/update-profile',
+      method: 'PATCH',
+      body: JSON.stringify(fields),
+      error: defaultErrorHandler,
+    }) as Promise<{ user: Record<string, unknown> }>;
+  },
 };

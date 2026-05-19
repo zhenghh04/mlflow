@@ -1,7 +1,20 @@
+import { btoaUtf8 as _btoaUtf8 } from '../common/utils/StringUtils';
+export { btoaUtf8 } from '../common/utils/StringUtils';
 export const AUTH_HEADER_COOKIE = 'mlflow-request-header-Authorization';
 export const MLFLOW_USER_COOKIE = 'mlflow_user';
+// SSO session cookie — set by the server after a successful OAuth2 callback
+export const SSO_TOKEN_COOKIE = 'mlflow_sso_token';
+// Team context cookie — cleared on logout so the switcher resets
+export const TEAM_HEADER_COOKIE = 'mlflow-request-header-X-MLflow-Tenant';
+export const ACTIVE_TEAM_COOKIE = 'mlflow_active_team';
 
-const AUTH_COOKIE_NAMES = [MLFLOW_USER_COOKIE, AUTH_HEADER_COOKIE];
+const AUTH_COOKIE_NAMES = [
+  MLFLOW_USER_COOKIE,
+  AUTH_HEADER_COOKIE,
+  SSO_TOKEN_COOKIE,
+  TEAM_HEADER_COOKIE,
+  ACTIVE_TEAM_COOKIE,
+];
 
 /**
  * Cookie deletion does an exact path match, so cover root + the app's
@@ -35,26 +48,34 @@ export const clearAuthCookies = () => {
  * ``Authorization`` header is treated as a one-off override and leaves
  * the cache intact.
  */
+/**
+ * Write Basic Auth credentials into the cookies that FetchUtils reads on
+ * every request.  Use ``btoaUtf8`` (re-exported from auth-utils) so
+ * non-ASCII usernames/passwords encode correctly.
+ */
+export const applyCredentials = (username: string, password: string) => {
+  const encoded = _btoaUtf8(`${username}:${password}`);
+  const encodedUsername = encodeURIComponent(username);
+  const expiresAttr = 'expires=Thu, 01 Jan 1970 00:00:00 UTC';
+  for (const path of getAuthCookiePaths()) {
+    // Clear any active SSO session so Basic Auth takes precedence on the server.
+    // Without this, the server always authenticates via the SSO token (checked
+    // first in _authenticate_sso_token) and ignores the new Basic Auth cookie.
+    document.cookie = `${SSO_TOKEN_COOKIE}=; ${expiresAttr}; path=${path};`;
+    document.cookie = `mlflow-request-header-X-SSO-Token=; ${expiresAttr}; path=${path};`;
+    document.cookie = `${AUTH_HEADER_COOKIE}=${encodeURIComponent(`Basic ${encoded}`)}; path=${path}`;
+    document.cookie = `${MLFLOW_USER_COOKIE}=${encodedUsername}; path=${path}`;
+  }
+};
+
 export const performLogout = (queryClient?: { clear: () => void }) => {
+  // 1. Clear all client-side auth cookies immediately
   clearAuthCookies();
   queryClient?.clear();
 
-  // Per-load nonce - if the bogus creds collide with real ones, the XHR
-  // would succeed and the browser would keep the cached creds.
-  const nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
-  const bogus = `mlflow-logged-out-${nonce}`;
-  const usersCurrentUrl = new URL('ajax-api/2.0/mlflow/users/current', window.location.href).toString();
-  const homeUrl = new URL('.', window.location.href).toString();
-
-  const goHome = () => window.location.assign(homeUrl);
-  try {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', usersCurrentUrl, true, bogus, bogus);
-    // Wait for the cache write before navigating - otherwise the home-page
-    // request could fire with stale creds and silently auto-auth.
-    xhr.onloadend = goHome;
-    xhr.send();
-  } catch {
-    goHome();
-  }
+  // 2. Navigate to the server-side logout endpoint.
+  //    The server sets Set-Cookie: mlflow_sso_token=; Max-Age=0 (server-side
+  //    clearing is more reliable than JS for Secure/HttpOnly cookies) and then
+  //    redirects to /#/login.
+  window.location.assign('/sso/logout');
 };

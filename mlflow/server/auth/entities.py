@@ -3,6 +3,134 @@ from mlflow.server.auth.permissions import get_permission
 from mlflow.utils.workspace_utils import DEFAULT_WORKSPACE_NAME, resolve_entity_workspace_name
 
 
+class TeamMembership:
+    def __init__(self, id_, user_id, tenant_id, role):
+        self._id = id_
+        self._user_id = user_id
+        self._tenant_id = tenant_id
+        self._role = role
+
+    @property
+    def id(self):
+        return self._id
+
+    @property
+    def user_id(self):
+        return self._user_id
+
+    @property
+    def tenant_id(self):
+        return self._tenant_id
+
+    @property
+    def role(self):
+        return self._role
+
+    @role.setter
+    def role(self, role):
+        self._role = role
+
+    def to_json(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "tenant_id": self.tenant_id,
+            "role": self.role,
+        }
+
+    @classmethod
+    def from_json(cls, dictionary):
+        return cls(
+            id_=dictionary["id"],
+            user_id=dictionary["user_id"],
+            tenant_id=dictionary["tenant_id"],
+            role=dictionary["role"],
+        )
+
+
+class Tenant:
+    def __init__(
+        self,
+        id_,
+        slug,
+        name,
+        storage_root=None,
+        max_experiments=None,
+        max_users=None,
+    ):
+        self._id = id_
+        self._slug = slug
+        self._name = name
+        self._storage_root = storage_root
+        self._max_experiments = max_experiments
+        self._max_users = max_users
+
+    @property
+    def id(self):
+        return self._id
+
+    @property
+    def slug(self):
+        return self._slug
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, name):
+        self._name = name
+
+    @property
+    def storage_root(self):
+        return self._storage_root
+
+    @storage_root.setter
+    def storage_root(self, storage_root):
+        self._storage_root = storage_root
+
+    @property
+    def max_experiments(self):
+        return self._max_experiments
+
+    @max_experiments.setter
+    def max_experiments(self, max_experiments):
+        self._max_experiments = max_experiments
+
+    @property
+    def max_users(self):
+        return self._max_users
+
+    @max_users.setter
+    def max_users(self, max_users):
+        self._max_users = max_users
+
+    def to_json(self):
+        return {
+            "id": self.id,
+            "slug": self.slug,
+            "name": self.name,
+            "storage_root": self.storage_root,
+            "max_experiments": self.max_experiments,
+            "max_users": self.max_users,
+        }
+
+    @classmethod
+    def from_json(cls, dictionary):
+        return cls(
+            id_=dictionary["id"],
+            slug=dictionary["slug"],
+            name=dictionary["name"],
+            storage_root=dictionary.get("storage_root"),
+            max_experiments=dictionary.get("max_experiments"),
+            max_users=dictionary.get("max_users"),
+        )
+
+
+_PROFILE_FIELDS = ("display_name", "email", "title", "department",
+                   "location", "bio", "github", "orcid", "avatar_url")
+
+
 class User:
     def __init__(
         self,
@@ -10,11 +138,29 @@ class User:
         username,
         password_hash,
         is_admin,
+        display_name=None,
+        email=None,
+        title=None,
+        department=None,
+        location=None,
+        bio=None,
+        github=None,
+        orcid=None,
+        avatar_url=None,
     ):
         self._id = id_
         self._username = username
         self._password_hash = password_hash
         self._is_admin = is_admin
+        self._display_name = display_name
+        self._email = email
+        self._title = title
+        self._department = department
+        self._location = location
+        self._bio = bio
+        self._github = github
+        self._orcid = orcid
+        self._avatar_url = avatar_url
 
     @property
     def id(self):
@@ -36,11 +182,39 @@ class User:
     def is_admin(self, is_admin):
         self._is_admin = is_admin
 
+    @property
+    def display_name(self): return self._display_name
+    @property
+    def email(self): return self._email
+    @property
+    def title(self): return self._title
+    @property
+    def department(self): return self._department
+    @property
+    def location(self): return self._location
+    @property
+    def bio(self): return self._bio
+    @property
+    def github(self): return self._github
+    @property
+    def orcid(self): return self._orcid
+    @property
+    def avatar_url(self): return self._avatar_url
+
     def to_json(self):
         return {
             "id": self.id,
             "username": self.username,
             "is_admin": self.is_admin,
+            "display_name": self.display_name,
+            "email": self.email,
+            "title": self.title,
+            "department": self.department,
+            "location": self.location,
+            "bio": self.bio,
+            "github": self.github,
+            "orcid": self.orcid,
+            "avatar_url": self.avatar_url,
         }
 
     @classmethod
