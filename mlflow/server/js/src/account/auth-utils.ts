@@ -56,7 +56,13 @@ export const clearAuthCookies = () => {
 export const applyCredentials = (username: string, password: string) => {
   const encoded = _btoaUtf8(`${username}:${password}`);
   const encodedUsername = encodeURIComponent(username);
+  const expiresAttr = 'expires=Thu, 01 Jan 1970 00:00:00 UTC';
   for (const path of getAuthCookiePaths()) {
+    // Clear any active SSO session so Basic Auth takes precedence on the server.
+    // Without this, the server always authenticates via the SSO token (checked
+    // first in _authenticate_sso_token) and ignores the new Basic Auth cookie.
+    document.cookie = `${SSO_TOKEN_COOKIE}=; ${expiresAttr}; path=${path};`;
+    document.cookie = `mlflow-request-header-X-SSO-Token=; ${expiresAttr}; path=${path};`;
     document.cookie = `${AUTH_HEADER_COOKIE}=${encodeURIComponent(`Basic ${encoded}`)}; path=${path}`;
     document.cookie = `${MLFLOW_USER_COOKIE}=${encodedUsername}; path=${path}`;
   }
