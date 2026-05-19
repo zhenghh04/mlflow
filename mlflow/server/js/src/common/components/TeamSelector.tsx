@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react';
 import { SimpleSelect, SimpleSelectOption, Spinner, Typography, useDesignSystemTheme } from '@databricks/design-system';
 import { useQueryClient } from '@mlflow/mlflow/src/common/utils/reactQueryHooks';
-import { useNavigate } from '../utils/RoutingUtils';
-import ExperimentTrackingRoutes from '../../experiment-tracking/routes';
 import { getDefaultHeaders } from '../utils/FetchUtils';
 import { getActiveTeamSlug, setActiveTeam } from '../../account/team-context';
 
@@ -43,7 +41,6 @@ const fetchUserTeams = async (): Promise<TeamEntry[]> => {
 export const TeamSelector = ({ collapsed }: { collapsed: boolean }) => {
   const { theme } = useDesignSystemTheme();
   const queryClient = useQueryClient();
-  const navigate = useNavigate({ bypassWorkspacePrefix: true });
 
   const [activeSlug, setActiveSlug] = useState(getActiveTeamSlug);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
@@ -71,8 +68,9 @@ export const TeamSelector = ({ collapsed }: { collapsed: boolean }) => {
     const slug = target.value;
     setActiveTeam(slug);
     setActiveSlug(slug);
+    // Clear cache so all active queries re-fetch under the new tenant.
+    // Do NOT navigate away — stay on the current page.
     queryClient.clear();
-    navigate(ExperimentTrackingRoutes.rootRoute);
   };
 
   const activeTeam = teams.find((t) => t.slug === activeSlug) ?? teams[0];
