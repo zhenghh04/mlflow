@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { SimpleSelect, SimpleSelectOption, Spinner, Typography, useDesignSystemTheme } from '@databricks/design-system';
 import { useQueryClient } from '@mlflow/mlflow/src/common/utils/reactQueryHooks';
+import { useApolloClient } from '@mlflow/mlflow/src/common/utils/graphQLHooks';
 import { getDefaultHeaders } from '../utils/FetchUtils';
 import { getActiveTeamSlug, setActiveTeam } from '../../account/team-context';
 
@@ -41,6 +42,7 @@ const fetchUserTeams = async (): Promise<TeamEntry[]> => {
 export const TeamSelector = ({ collapsed }: { collapsed: boolean }) => {
   const { theme } = useDesignSystemTheme();
   const queryClient = useQueryClient();
+  const apolloClient = useApolloClient();
 
   const [activeSlug, setActiveSlug] = useState(getActiveTeamSlug);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
@@ -68,9 +70,12 @@ export const TeamSelector = ({ collapsed }: { collapsed: boolean }) => {
     const slug = target.value;
     setActiveTeam(slug);
     setActiveSlug(slug);
-    // Clear cache so all active queries re-fetch under the new tenant.
-    // Do NOT navigate away — stay on the current page.
-    queryClient.clear();
+    // resetQueries() resets data to pending and immediately re-fetches all
+    // active React Query observers (REST API pages like Admin > Projects).
+    queryClient.resetQueries();
+    // resetStore() clears and re-fetches all active Apollo/GraphQL queries
+    // (main experiments list, run pages, etc.).
+    apolloClient.resetStore().catch(() => {});
   };
 
   const activeTeam = teams.find((t) => t.slug === activeSlug) ?? teams[0];
