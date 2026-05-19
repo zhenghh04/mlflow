@@ -1,7 +1,7 @@
 {
   "files": {
     "main.css": "/static-files/static/css/main.b0f58ef9.css",
-    "main.js": "/static-files/static/js/main.214955b0.js",
+    "main.js": "/static-files/static/js/main.bd1afc46.js",
     "ml-model-trace-renderer.js": "/static-files/lib/notebook-trace-renderer/js/ml-model-trace-renderer.237e392cbb75bda9bce0.js",
     "telemetry-worker.js": "/static-files/TelemetryLogger.telemetry-worker.d0f8ea2c83c08b63528f.worker.js",
     "static/js/7561.8c0cc066.chunk.js": "/static-files/static/js/7561.8c0cc066.chunk.js",
@@ -194,6 +194,6 @@
   },
   "entrypoints": [
     "static/css/main.b0f58ef9.css",
-    "static/js/main.214955b0.js"
+    "static/js/main.bd1afc46.js"
   ]
 }
